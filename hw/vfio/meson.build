@@ -42,11 +42,14 @@ system_ss.add(when: 'CONFIG_VFIO_PCI', if_true: files(
   'display.c',
 ))
 
-# Apple VFIO backend
+# DriverKit/PCIDriverKit is a Darwin host API and is not selected by CPU
+# architecture. This includes both arm64 and x86_64 Darwin builds. Runtime
+# support still depends on the macOS version, entitlements, device and DMA path.
 if host_os == 'darwin'
   system_ss.add(when: 'CONFIG_VFIO',
                 if_true: [files('apple-device.c', 'apple-dma.c',
-                                'container-apple.c', 'apple-dext-client.c'),
+                                'container-apple.c', 'apple-dext-client.c',
+                                'apple-host-backend.c'),
                           coref, iokit])
   # FDT helper lives in specific_ss because libfdt is only linked into
   # targets that set CONFIG_DEVICE_TREE; system_ss is compiled once and
