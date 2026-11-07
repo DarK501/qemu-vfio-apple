@@ -1,18 +1,7 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * C API for connecting to the VFIOUserPCIDriver DriverKit extension.
- *
- * The vfio-user server process uses this to:
- *  1. Find and open an IOUserClient to the dext for a given PCI BDF.
- *  2. Claim the device so the dext opens its IOPCIDevice provider.
- *  3. Register client-owned memory (QEMU guest RAM mapped via shared file)
- *     for DMA by the physical PCI device.
- *  4. Unregister DMA regions when QEMU removes them.
- *
- * Integration with libvfio-user:
- *   vfu_dma_register_cb_t  ->  apple_dext_register_dma()
- *   vfu_dma_unregister_cb_t -> apple_dext_unregister_dma()
+ * C API for communicating with the VFIOUserPCIDriver DriverKit extension.
  *
  * Copyright (c) 2026 Scott J. Goldman
  */
@@ -23,283 +12,131 @@
 #include <IOKit/IOKitLib.h>
 #include <stdint.h>
 
-/*
- * Find the VFIOUserPCIDriver dext instance matching the given PCI BDF
- * and open an IOUserClient connection to it.
- *
- * If `host_root` is NULL, BDF must uniquely identify a single
- * VFIOUserPCIDriver instance — if two or more dext instances claim the
- * same BDF (because they live under different host PCI roots), this
- * fails with `*errp` describing the candidates. The caller can then
- * specify `host_root` to pick one (the registry-entry name of the
- * topmost IOPCIDevice ancestor, e.g. "pcic0-bridge" or "pci-bridge0").
- *
- * If `host_root` is non-NULL, only the matching candidate is selected.
- *
- * Returns IO_OBJECT_NULL on failure (with `*errp` set on ambiguity or no
- * match; left unset on plain IOKit errors so callers can synthesise their
- * own message).
- */
+/* Opaque async interrupt notification handle. */
+typedef struct AppleDextInterruptNotify AppleDextInterruptNotify;
+
 io_connect_t apple_dext_connect_with_root(uint8_t bus, uint8_t device,
                                           uint8_t function,
                                           const char *host_root,
                                           char **errp);
-
-/*
- * Convenience wrapper: same as apple_dext_connect_with_root(..., NULL, NULL).
- * Use this for paths that have already validated uniqueness or don't care.
- */
 io_connect_t apple_dext_connect(uint8_t bus, uint8_t device,
-                                    uint8_t function);
-
-/*
- * Close a previously opened connection.
- */
+                                uint8_t function);
 void apple_dext_disconnect(io_connect_t connection);
-
-/*
- * Claim the PCI device through the dext (opens the IOPCIDevice provider).
- * Must be called before registering DMA regions.
- */
 kern_return_t apple_dext_claim(io_connect_t connection);
-
-/*
- * Register a region of this process's address space for DMA.
- *
- * @iova:         guest IOVA (device-visible DMA address)
- * @client_va:    virtual address of the memory in this process
- * @size:         region size in bytes
- * @out_bus_addr: receives first DMA bus address segment (may be NULL)
- * @out_bus_len:  receives first DMA bus address segment length (may be NULL)
- *
- * The memory at client_va must remain valid and mapped until the region
- * is unregistered.
- */
-kern_return_t apple_dext_register_dma(io_connect_t connection,
-                                          uint64_t iova,
-                                          uint64_t client_va,
-                                          uint64_t size,
-                                          uint64_t *out_bus_addr,
-                                          uint64_t *out_bus_len);
-
-/*
- * Allocate a DMA buffer in the dext and map it into this process.
- *
- * The dext allocates kernel memory (IOBufferMemoryDescriptor) and calls
- * PrepareForDMA once for the entire buffer, yielding a contiguous IOVA.
- * The buffer is then mapped into the caller's address space.
- *
- * @size:         requested buffer size in bytes
- * @alignment:    alignment in bytes (0 defaults to page size)
- * @out_bus_addr: receives the DMA bus address (IOVA)
- * @out_bus_len:  receives the DMA segment length
- * @out_addr:     receives the mapped virtual address in this process
- * @out_size:     receives the mapped size
- */
+kern_return_t apple_dext_register_dma(io_connect_t connection, uint64_t iova,
+                                       uint64_t client_va, uint64_t size,
+                                       uint64_t *out_bus_addr,
+                                       uint64_t *out_bus_len);
 kern_return_t apple_dext_allocate_dma_buffer(io_connect_t connection,
-                                             uint64_t size,
-                                             uint64_t alignment,
+                                             uint64_t size, uint64_t alignment,
                                              uint64_t *out_bus_addr,
                                              uint64_t *out_bus_len,
                                              mach_vm_address_t *out_addr,
                                              mach_vm_size_t *out_size);
-
-/*
- * Free a DMA buffer previously allocated with apple_dext_allocate_dma_buffer.
- * Unmaps the buffer from this process and releases it in the dext.
- *
- * @addr: the mapped address returned by apple_dext_allocate_dma_buffer
- */
 kern_return_t apple_dext_free_dma_buffer(io_connect_t connection,
-                                         mach_vm_address_t addr);
-
-/*
- * Unregister a previously registered DMA region identified by its IOVA.
- */
+                                          mach_vm_address_t addr);
 kern_return_t apple_dext_unregister_dma(io_connect_t connection,
-                                            uint64_t iova);
-
-/*
- * Read 8 bytes from a registered DMA region's IOMemoryDescriptor.
- * Used to verify the descriptor references the same physical pages
- * as the client's virtual mapping.
- *
- * @iova:     base IOVA of the registered region
- * @offset:   byte offset within the region to read from
- * @out_word: receives the 8-byte value read from the descriptor
- */
-kern_return_t apple_dext_probe_dma(io_connect_t connection,
-                                       uint64_t iova,
-                                       uint64_t offset,
-                                       uint64_t *out_word);
-
-/*
- * Read from PCI configuration space.
- *
- * @offset: byte offset into config space
- * @width:  access width in bytes (1, 2, or 4)
- * @out_value: receives the value read
- */
-kern_return_t apple_dext_config_read(io_connect_t connection,
-                                         uint64_t offset,
-                                         uint64_t width,
-                                         uint64_t *out_value);
-
-/*
- * Write to PCI configuration space.
- *
- * @offset: byte offset into config space
- * @width:  access width in bytes (1, 2, or 4)
- * @value:  value to write
- */
-kern_return_t apple_dext_config_write(io_connect_t connection,
-                                          uint64_t offset,
-                                          uint64_t width,
-                                          uint64_t value);
-
-/*
- * Read a contiguous block of PCI configuration space.
- * Internally issues repeated 32-bit reads, with a final
- * narrower read for any trailing bytes.
- *
- * @offset: starting byte offset
- * @buf:    destination buffer
- * @len:    number of bytes to read
- */
+                                         uint64_t iova);
+kern_return_t apple_dext_probe_dma(io_connect_t connection, uint64_t iova,
+                                   uint64_t offset, uint64_t *out_word);
+kern_return_t apple_dext_config_read(io_connect_t connection, uint64_t offset,
+                                     uint64_t width, uint64_t *out_value);
+kern_return_t apple_dext_config_write(io_connect_t connection, uint64_t offset,
+                                      uint64_t width, uint64_t value);
 kern_return_t apple_dext_config_read_block(io_connect_t connection,
-                                               uint64_t offset,
-                                               void *buf,
-                                               size_t len);
-
-/*
- * Query BAR information from the PCI device.
- *
- * @bar:          BAR index (0-5)
- * @out_mem_idx:  receives the memory index for MemoryRead/Write calls
- * @out_size:     receives the BAR size in bytes
- * @out_type:     receives the BAR type (mem32, mem64, io, etc.)
- */
-kern_return_t apple_dext_get_bar_info(io_connect_t connection,
-                                          uint8_t bar,
-                                          uint8_t *out_mem_idx,
-                                          uint64_t *out_size,
-                                          uint8_t *out_type);
-
-/*
- * Map a PCI BAR directly into this process through the dext.
- *
- * The dext supplies the BAR's IOMemoryDescriptor and IOKit applies the
- * appropriate cache mode for the BAR type (default-cache for BAR0 style
- * register windows, write-combine for prefetchable apertures).
- *
- * @bar:      BAR index (0-5)
- * @out_addr: receives the mapped virtual address
- * @out_size: receives the mapped size
- * @out_type: receives the BAR type (may be NULL)
- */
-kern_return_t apple_dext_map_bar(io_connect_t connection,
-                                     uint8_t bar,
-                                     mach_vm_address_t *out_addr,
-                                     mach_vm_size_t *out_size,
-                                     uint8_t *out_type);
-
-/*
- * Unmap a BAR previously mapped with apple_dext_map_bar().
- */
-kern_return_t apple_dext_unmap_bar(io_connect_t connection,
-                                       uint8_t bar,
-                                       mach_vm_address_t addr);
-
-/*
- * Read from a PCI BAR (MMIO).
- *
- * @mem_idx: memory index from apple_dext_get_bar_info
- * @offset:  byte offset within the BAR
- * @width:   access width in bytes (1, 2, 4, or 8)
- * @out_value: receives the value read
- */
-kern_return_t apple_dext_mmio_read(io_connect_t connection,
-                                       uint8_t mem_idx,
-                                       uint64_t offset,
-                                       uint64_t width,
-                                       uint64_t *out_value);
-
-/*
- * Write to a PCI BAR (MMIO).
- *
- * @mem_idx: memory index from apple_dext_get_bar_info
- * @offset:  byte offset within the BAR
- * @width:   access width in bytes (1, 2, 4, or 8)
- * @value:   value to write
- */
-kern_return_t apple_dext_mmio_write(io_connect_t connection,
-                                        uint8_t mem_idx,
-                                        uint64_t offset,
-                                        uint64_t width,
-                                        uint64_t value);
-
-/*
- * Set up interrupt forwarding for the PCI device.
- * Creates IOInterruptDispatchSource handlers for all available
- * MSI/MSI-X vectors in the dext. Interrupts are queued in a ring
- * buffer and retrieved via apple_dext_check_interrupt().
- *
- * @out_num_vectors: receives the number of interrupt vectors registered
- */
+                                           uint64_t offset, void *buf,
+                                           size_t len);
+kern_return_t apple_dext_get_bar_info(io_connect_t connection, uint8_t bar,
+                                      uint8_t *out_mem_idx, uint64_t *out_size,
+                                      uint8_t *out_type);
+kern_return_t apple_dext_map_bar(io_connect_t connection, uint8_t bar,
+                                 mach_vm_address_t *out_addr,
+                                 mach_vm_size_t *out_size, uint8_t *out_type);
+kern_return_t apple_dext_unmap_bar(io_connect_t connection, uint8_t bar,
+                                   mach_vm_address_t addr);
+kern_return_t apple_dext_mmio_read(io_connect_t connection, uint8_t mem_idx,
+                                   uint64_t offset, uint64_t width,
+                                   uint64_t *out_value);
+kern_return_t apple_dext_mmio_write(io_connect_t connection, uint8_t mem_idx,
+                                    uint64_t offset, uint64_t width,
+                                    uint64_t value);
 kern_return_t apple_dext_setup_interrupts(io_connect_t connection,
-                                              uint32_t *out_num_vectors);
-
-/*
- * Reset the PCI device via the dext. The dext tries FLR first and falls
- * back to a secondary bus (hot) reset if FLR isn't supported.
- */
+                                          uint32_t *out_num_vectors);
 kern_return_t apple_dext_reset_device(io_connect_t connection);
-
-/*
- * Set the IRQ enable mask in the dext.  Only vectors with their
- * corresponding bit set will be recorded as pending when the
- * hardware fires.  mask[] is 4 x uint64_t covering 256 vectors.
- */
 kern_return_t apple_dext_set_irq_mask(io_connect_t connection,
                                       const uint64_t mask[4]);
-
-/*
- * Read and clear all pending interrupt bits from the dext.
- * Returns up to 256 bits (4 MSI/MSI-X vectors per bit) across
- * 4 uint64_t words.  Each bit that was set is atomically cleared
- * in the dext.
- */
 kern_return_t apple_dext_read_pending_irqs(io_connect_t connection,
                                            uint64_t pending[4]);
-
-/*
- * Opaque state for async interrupt notification from the dext.
- */
-typedef struct AppleDextInterruptNotify AppleDextInterruptNotify;
-
-/*
- * Create async interrupt notification.  handler_fn is called on a GCD
- * dispatch queue whenever the dext signals that one or more interrupt
- * bits have been set.  The handler should wake the QEMU main loop,
- * which then calls apple_dext_read_pending_irqs() to drain the bits.
- *
- * The notification is armed immediately upon creation.
- */
-AppleDextInterruptNotify *
-apple_dext_interrupt_notify_create(io_connect_t connection,
-                                   void (*handler_fn)(void *opaque),
-                                   void *opaque);
-
-/*
- * Re-arm the async interrupt notification after draining pending bits.
- * Must be called after each wakeup to receive subsequent notifications.
- */
-kern_return_t
-apple_dext_interrupt_notify_rearm(AppleDextInterruptNotify *notify);
-
-/*
- * Tear down and free async interrupt notification state.
- */
+AppleDextInterruptNotify *apple_dext_interrupt_notify_create(
+    io_connect_t connection, void (*handler_fn)(void *opaque), void *opaque);
+kern_return_t apple_dext_interrupt_notify_rearm(
+    AppleDextInterruptNotify *notify);
 void apple_dext_interrupt_notify_destroy(AppleDextInterruptNotify *notify);
+
+#ifndef APPLE_VFIO_BACKEND_IMPLEMENTATION
+#include "hw/vfio/apple-host-backend.h"
+
+/* Route all consumers through the architecture-selected backend. The backend
+ * implementation defines APPLE_VFIO_BACKEND_IMPLEMENTATION to bind these ops
+ * to the underlying DriverKit client without recursive macro expansion.
+ */
+#define apple_dext_connect_with_root(bus, device, function, root, errp) \
+    (apple_vfio_host_backend_ops()->connect_with_root( \
+        (bus), (device), (function), (root), (errp)))
+#define apple_dext_connect(bus, device, function) \
+    (apple_vfio_host_backend_ops()->connect_with_root( \
+        (bus), (device), (function), NULL, NULL))
+#define apple_dext_disconnect(conn) \
+    (apple_vfio_host_backend_ops()->disconnect(conn))
+#define apple_dext_claim(conn) (apple_vfio_host_backend_ops()->claim(conn))
+#define apple_dext_register_dma(conn, iova, va, size, addr, len) \
+    (apple_vfio_host_backend_ops()->register_dma( \
+        (conn), (iova), (va), (size), (addr), (len)))
+#define apple_dext_allocate_dma_buffer(conn, size, align, addr, len, va, vsize) \
+    (apple_vfio_host_backend_ops()->allocate_dma_buffer( \
+        (conn), (size), (align), (addr), (len), (va), (vsize)))
+#define apple_dext_free_dma_buffer(conn, addr) \
+    (apple_vfio_host_backend_ops()->free_dma_buffer((conn), (addr)))
+#define apple_dext_unregister_dma(conn, iova) \
+    (apple_vfio_host_backend_ops()->unregister_dma((conn), (iova)))
+#define apple_dext_probe_dma(conn, iova, off, word) \
+    (apple_vfio_host_backend_ops()->probe_dma((conn), (iova), (off), (word)))
+#define apple_dext_config_read(conn, off, width, value) \
+    (apple_vfio_host_backend_ops()->config_read((conn), (off), (width), (value)))
+#define apple_dext_config_write(conn, off, width, value) \
+    (apple_vfio_host_backend_ops()->config_write((conn), (off), (width), (value)))
+#define apple_dext_config_read_block(conn, off, buf, len) \
+    (apple_vfio_host_backend_ops()->config_read_block( \
+        (conn), (off), (buf), (len)))
+#define apple_dext_get_bar_info(conn, bar, idx, size, type) \
+    (apple_vfio_host_backend_ops()->get_bar_info( \
+        (conn), (bar), (idx), (size), (type)))
+#define apple_dext_map_bar(conn, bar, addr, size, type) \
+    (apple_vfio_host_backend_ops()->map_bar( \
+        (conn), (bar), (addr), (size), (type)))
+#define apple_dext_unmap_bar(conn, bar, addr) \
+    (apple_vfio_host_backend_ops()->unmap_bar((conn), (bar), (addr)))
+#define apple_dext_mmio_read(conn, idx, off, width, value) \
+    (apple_vfio_host_backend_ops()->mmio_read( \
+        (conn), (idx), (off), (width), (value)))
+#define apple_dext_mmio_write(conn, idx, off, width, value) \
+    (apple_vfio_host_backend_ops()->mmio_write( \
+        (conn), (idx), (off), (width), (value)))
+#define apple_dext_setup_interrupts(conn, vectors) \
+    (apple_vfio_host_backend_ops()->setup_interrupts((conn), (vectors)))
+#define apple_dext_reset_device(conn) \
+    (apple_vfio_host_backend_ops()->reset_device(conn))
+#define apple_dext_set_irq_mask(conn, mask) \
+    (apple_vfio_host_backend_ops()->set_irq_mask((conn), (mask)))
+#define apple_dext_read_pending_irqs(conn, pending) \
+    (apple_vfio_host_backend_ops()->read_pending_irqs((conn), (pending)))
+#define apple_dext_interrupt_notify_create(conn, fn, opaque) \
+    (apple_vfio_host_backend_ops()->interrupt_notify_create( \
+        (conn), (fn), (opaque)))
+#define apple_dext_interrupt_notify_rearm(notify) \
+    (apple_vfio_host_backend_ops()->interrupt_notify_rearm(notify))
+#define apple_dext_interrupt_notify_destroy(notify) \
+    (apple_vfio_host_backend_ops()->interrupt_notify_destroy(notify))
+#endif /* !APPLE_VFIO_BACKEND_IMPLEMENTATION */
 
 #endif /* HW_VFIO_APPLE_DEXT_CLIENT_H */
