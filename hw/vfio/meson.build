@@ -42,9 +42,8 @@ system_ss.add(when: 'CONFIG_VFIO_PCI', if_true: files(
   'display.c',
 ))
 
-# DriverKit/PCIDriverKit is a Darwin host API. Include the backend abstraction
-# for every Darwin architecture; apple-host-backend.c selects the DMA model at
-# compile time (x86_64 Intel IOMMU vs arm64 Apple DART).
+# DriverKit/PCIDriverKit backend. The backend source selects Intel VT-d for
+# Darwin x86_64 or Apple DART for Darwin arm64. Include it in the Darwin build.
 if host_os == 'darwin'
   system_ss.add(when: 'CONFIG_VFIO',
                 if_true: [files('apple-device.c', 'apple-dma.c',

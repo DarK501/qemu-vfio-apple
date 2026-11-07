@@ -1,24 +1,20 @@
-# Apple-VFIO host architecture selection
+Darwin Intel host backend
+==========================
 
-Apple-VFIO is built on Darwin hosts. Its host backend selection is architecture
-specific:
+On Darwin x86_64, QEMU selects the ``darwin-intel-iommu`` backend. The QEMU
+backend communicates with the ``VFIOUserPCIDriver`` DriverKit extension using
+the existing IOUserClient protocol. The extension creates ``IODMACommand``
+objects for the device and prepares DMA mappings; Darwin's PCI/DMA stack
+programs Intel VT-d and returns the device-visible DMA segments. QEMU does not
+write VT-d registers or infer DMA addresses from guest physical addresses.
 
-- x86_64 Darwin (Intel Macs): `darwin-intel-iommu`
-- arm64 Darwin (Apple Silicon): `darwin-apple-dart`
+The Darwin arm64 build selects ``darwin-apple-dart`` and uses the same DriverKit
+client protocol, with the platform DMA stack preparing DART mappings. PCI config
+space, BAR access, reset, and interrupt forwarding are shared operations; the
+host IOMMU-specific behavior is provided by the OS's IODMACommand implementation.
 
-Both backends use the DriverKit/PCIDriverKit service and the existing QEMU-to-
-DriverKit client interface. The DriverKit extension's `IODMACommand` is the
-host-side abstraction that prepares device-visible DMA segments; the platform
-implementation is expected to use the Intel IOMMU on Intel hosts and DART on
-Apple Silicon. The PCI config/BAR, reset, and interrupt operations continue to
-use the shared DriverKit client operations.
-
-This change provides architecture-specific backend identity and selection. It
-does not, by itself, prove that all Intel Mac models, macOS releases, devices,
-or IOMMU configurations work, nor does it implement a separate raw VT-d
-programming interface in QEMU. Do not advertise a hardware/OS combination as
-supported until the DriverKit path and DMA results have been verified there.
-
-The current guest DMA companion protocol can remain shared only if it receives
-and correctly uses the device-visible DMA segments returned by the host backend;
-it must not assume that a guest physical address is itself the host DMA address.
+The guest DMA companion reports the DMA segments returned by the host mapping
+operation. Consumers must use the returned DMA address and length, not assume
+identity mapping from guest physical address. This backend work does not by
+itself certify support for every Intel Mac, macOS release, or PCI device; it
+establishes the x86_64 selection and dispatch path.
