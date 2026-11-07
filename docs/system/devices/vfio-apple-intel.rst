@@ -1,35 +1,24 @@
-# Intel Darwin host status
+# Apple-VFIO host architecture selection
 
-The Darwin VFIO backend is selected by the host operating system (`host_os ==
-'darwin'`), not by the CPU architecture. QEMU builds for both arm64 and x86_64
-Darwin therefore use the same DriverKit/PCIDriverKit client backend. The
-backend abstraction is wired to the existing DriverKit client API; there is no
-separate non-Darwin "Intel" backend selected for Intel Macs.
+Apple-VFIO is built on Darwin hosts. Its host backend selection is architecture
+specific:
 
-This is **not a claim of tested Intel-Mac passthrough support**. The host
-backend still relies on the DriverKit extension successfully matching and
-claiming the device, exposing BAR/config access, mapping guest memory for DMA,
-and forwarding interrupts. Those capabilities must be tested on the intended
-Intel Mac model, macOS release, and PCI/Thunderbolt device. In particular, the
-existing guest companion device and DMA path were developed around the Apple
-backend and must be validated against Intel host IOMMU behavior before this is
-considered safe or supported.
+- x86_64 Darwin (Intel Macs): `darwin-intel-iommu`
+- arm64 Darwin (Apple Silicon): `darwin-apple-dart`
 
-## Intel validation gate
+Both backends use the DriverKit/PCIDriverKit service and the existing QEMU-to-
+DriverKit client interface. The DriverKit extension's `IODMACommand` is the
+host-side abstraction that prepares device-visible DMA segments; the platform
+implementation is expected to use the Intel IOMMU on Intel hosts and DART on
+Apple Silicon. The PCI config/BAR, reset, and interrupt operations continue to
+use the shared DriverKit client operations.
 
-Before advertising support, test on an Intel Mac (for example, a 2019 MacBook
-Pro with a supported external PCIe device):
+This change provides architecture-specific backend identity and selection. It
+does not, by itself, prove that all Intel Mac models, macOS releases, devices,
+or IOMMU configurations work, nor does it implement a separate raw VT-d
+programming interface in QEMU. Do not advertise a hardware/OS combination as
+supported until the DriverKit path and DMA results have been verified there.
 
-1. Build the DriverKit extension and QEMU as x86_64 for the target macOS SDK and
-   verify extension installation/activation and device matching.
-2. Confirm device ownership and test config-space access, BAR mapping/MMIO, and
-   reset while the host driver is detached/appropriately relinquished.
-3. Exercise DMA map/unmap using `IODMACommand`; verify that the guest-visible
-   DMA addresses match actual device transactions and that teardown leaves no
-   stale mappings.
-4. Test MSI/MSI-X delivery, interruption, VM shutdown, and error rollback.
-5. Run representative guest workloads under load and repeat across cold boots
-   and sleep/wake cycles. Record hardware, OS, entitlements, and limitations.
-
-Until these tests pass, Intel Darwin should be described as a build/code path
-under evaluation, not as supported passthrough hardware.
+The current guest DMA companion protocol can remain shared only if it receives
+and correctly uses the device-visible DMA segments returned by the host backend;
+it must not assume that a guest physical address is itself the host DMA address.

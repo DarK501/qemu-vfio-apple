@@ -1,16 +1,16 @@
 /*
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
- * Darwin DriverKit host backend for Apple-VFIO.
+ * Darwin host backend selection for Apple-VFIO.
  *
- * PCIDriverKit is a Darwin host API, not an Apple-Silicon CPU API. Keep the
- * backend selected by the Darwin build and let DriverKit/IODMACommand provide
- * the host-specific PCI and DMA behavior. In particular, do not select a
- * non-Darwin "Intel" stub based on host architecture: Intel Macs are Darwin.
+ * Selection is based on the architecture of the Darwin QEMU binary:
+ *   x86_64: Intel Mac, DriverKit DMA mappings use the Intel IOMMU path
+ *   arm64:  Apple Silicon, DriverKit DMA mappings use the Apple DART path
  *
- * This backend forwards to the existing DriverKit client implementation. It
- * does not by itself establish that every Intel Mac/device supports passthrough;
- * that requires validation on the target macOS and hardware.
+ * Both paths use the DriverKit client transport. The dext's IODMACommand is
+ * responsible for producing the device-visible DMA segments for the host
+ * platform. The QEMU-side distinction identifies the host DMA model; it does
+ * not introduce a separate public Intel IOMMU programming API.
  */
 
 #include "qemu/osdep.h"
@@ -44,12 +44,25 @@ static const AppleVFIOHostBackendOps driverkit_pci_backend_ops = {
     .interrupt_notify_destroy = apple_dext_interrupt_notify_destroy,
 };
 
-static const AppleVFIOHostBackend driverkit_pci_backend = {
-    .name = "darwin-driverkit-pci",
+#if defined(__x86_64__)
+static const AppleVFIOHostBackend darwin_intel_iommu_backend = {
+    .name = "darwin-intel-iommu",
     .ops = &driverkit_pci_backend_ops,
 };
+#elif defined(__aarch64__) || defined(__arm64__)
+static const AppleVFIOHostBackend darwin_apple_dart_backend = {
+    .name = "darwin-apple-dart",
+    .ops = &driverkit_pci_backend_ops,
+};
+#else
+#error "Apple VFIO supports Darwin x86_64 (Intel) or arm64 (Apple Silicon) hosts"
+#endif
 
 const AppleVFIOHostBackend *apple_vfio_host_backend(void)
 {
-    return &driverkit_pci_backend;
+#if defined(__x86_64__)
+    return &darwin_intel_iommu_backend;
+#else
+    return &darwin_apple_dart_backend;
+#endif
 }
