@@ -93,6 +93,31 @@ DriverKit Open can map device memory, and Close can clear bus-master and memory
 enable bits. The probe does not set those bits, but they might already be set.
 It does not prove that the device is quiescent or that DMA is safe.
 
+For an explicitly selected PCI registry entry with no direct child services,
+`scripts/rescan-pci.c` offers an opt-in PCI rescan request. It requires the
+exact BDF and vendor/device IDs, rejects ambiguous BDFs and attached services,
+and does not open or claim the device. Compile it from the repository root:
+
+```sh
+clang -std=c11 -Wall -Wextra -Werror -framework IOKit -framework CoreFoundation \
+  contrib/apple-vfio/scripts/rescan-pci.c -o /tmp/vfio-rescan-pci
+```
+
+For example, `/tmp/vfio-rescan-pci 44:00.0 1002:731f --confirm-rescan`
+requests a scan on that entry. A scan can reconfigure PCI resources or affect
+other devices, even though it targets a specific entry. Its pre-check is a
+snapshot, not a guarantee of quiescence. It may fail, remove the entry,
+re-attach macOS drivers, or have no effect. A successful request does not
+prove that VFIO matched or that PCI Open succeeded; inspect `list-devices`.
+Do not use the normal claim or guest DMA to check the outcome.
+
+The alternative catalogue-matching pathway is not exposed: Apple's published
+kernel code requires a private catalogue-management entitlement, can report
+success without performing the request when unauthorized, and marks the old
+start-matching operation removed. Adding an already-present personality may
+not trigger matching. This project cannot assume that root or ad-hoc signing
+authorizes it.
+
 The DMA companion must share the matching `vfio-apple-pci` connection; the
 normal `dma-companion=on` configuration creates it automatically. Standalone
 companions must be realized after their matching VFIO device, and a second
