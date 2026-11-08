@@ -23,6 +23,7 @@
 #include "qemu/host-pci-mmio.h"
 #include "qemu/main-loop.h"
 #include "qemu/units.h"
+#include "system/system.h"
 
 typedef struct AppleVFIOSharedDext {
     io_connect_t conn;
@@ -870,20 +871,26 @@ VFIODeviceIOOps apple_vfio_device_io_ops = {
     .region_unmap = apple_vfio_region_unmap,
 };
 
+static kern_return_t apple_vfio_dext_release_claim(io_connect_t conn)
+{
+    kern_return_t kr;
+    unsigned int attempt;
+
+    for (attempt = 0; ; attempt++) {
+        kr = apple_host_backend()->client->release_claim(conn);
+        if (kr != kIOReturnStillOpen || attempt == 99) {
+            return kr;
+        }
+        g_usleep(10000);
+    }
+}
+
 bool apple_vfio_dext_close_connection(io_connect_t conn, bool claimed)
 {
     kern_return_t kr;
 
     if (claimed) {
-        unsigned int attempt;
-
-        for (attempt = 0; ; attempt++) {
-            kr = apple_host_backend()->client->release_claim(conn);
-            if (kr != kIOReturnStillOpen || attempt == 99) {
-                break;
-            }
-            g_usleep(10000);
-        }
+        kr = apple_vfio_dext_release_claim(conn);
         if (kr != KERN_SUCCESS) {
             error_report("vfio-apple: claim release failed (kr=0x%x); "
                          "retaining connection until process exit; "
@@ -901,6 +908,38 @@ bool apple_vfio_dext_close_connection(io_connect_t conn, bool claimed)
     return true;
 }
 
+static void apple_vfio_dext_exit_release(gpointer key, gpointer value,
+                                         gpointer opaque)
+{
+    AppleVFIOSharedDext *shared = value;
+    kern_return_t kr = apple_vfio_dext_release_claim(shared->conn);
+
+    (void)opaque;
+    if (kr != KERN_SUCCESS) {
+        error_report("vfio-apple: exit claim release failed for %s "
+                     "(kr=0x%x); process exit may force unsafe teardown",
+                     (const char *)key, kr);
+    } else {
+        info_report("vfio-apple: exit claim release succeeded for %s",
+                    (const char *)key);
+    }
+}
+
+static void apple_vfio_dext_exit_notify(Notifier *notifier, void *data)
+{
+    (void)notifier;
+    (void)data;
+    if (apple_vfio_shared_dexts) {
+        /* Leave connections open for their remaining users until process exit. */
+        g_hash_table_foreach(apple_vfio_shared_dexts,
+                             apple_vfio_dext_exit_release, NULL);
+    }
+}
+
+static Notifier apple_vfio_dext_exit_notifier = {
+    .notify = apple_vfio_dext_exit_notify,
+};
+
 bool apple_vfio_dext_publish(uint8_t bus, uint8_t device, uint8_t function,
                              const char *host_root, uint32_t managed_bdf,
                              io_connect_t conn)
@@ -911,6 +950,7 @@ bool apple_vfio_dext_publish(uint8_t bus, uint8_t device, uint8_t function,
     if (!apple_vfio_shared_dexts) {
         apple_vfio_shared_dexts =
             g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        qemu_add_exit_notifier(&apple_vfio_dext_exit_notifier);
     }
 
     if (g_hash_table_lookup(apple_vfio_shared_dexts, key)) {

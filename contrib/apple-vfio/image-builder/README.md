@@ -108,6 +108,12 @@ the error and retains the connection rather than knowingly closing it; this
 does not guarantee safety if QEMU exits or DriverKit forces teardown. Do not
 run physical-device guest DMA until the guest DMA interception race and the
 complete mapping and shutdown lifecycle have been resolved and validated.
+On normal process exit, QEMU also attempts release for remaining published
+connections because QEMU does not necessarily unrealize devices on `quit`.
+This does not unmap live DMA resources: the dext refuses the release if such
+resources remain, and the process will still exit on failure. Abrupt
+termination can bypass the exit handler. A successful command-register
+readback does not establish that outstanding DMA transactions have drained.
 The app's `vfio-gpu-claim:` messages and the dext's `vfio-user-dext:` messages
 are recorded by the macOS unified log with timestamps. To capture them:
 

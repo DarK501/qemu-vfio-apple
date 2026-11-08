@@ -32,6 +32,7 @@ struct IOService { virtual ~IOService() = default; };
 struct IOPCIDevice {
     IOMemoryDescriptor *bar;
     int copies = 0;
+    IOService *sessionOwner = nullptr;
     int GetBARInfo(uint8_t idx, uint8_t *memoryIndex, uint64_t *size,
                    uint8_t *barType) {
         *memoryIndex = idx;
@@ -40,8 +41,11 @@ struct IOPCIDevice {
         return kIOReturnSuccess;
     }
     int _CopyDeviceMemoryWithIndex(uint8_t, IOMemoryDescriptor **memory,
-                                   IOService *) {
+                                   IOService *client) {
         copies++;
+        if (client != sessionOwner) {
+            return kIOReturnNotOpen;
+        }
         bar->retain();
         *memory = bar;
         return kIOReturnSuccess;
@@ -87,6 +91,8 @@ int main()
     VFIOUserPCIDriver driver_a, driver_b;
     driver_a.ivars = &vars_a; driver_a.device = &pci_a;
     driver_b.ivars = &vars_b; driver_b.device = &pci_b;
+    pci_a.sessionOwner = &driver_a;
+    pci_b.sessionOwner = &driver_b;
     ClientIvars primary_a_vars, primary_b_vars, secondary_vars;
     primary_a_vars.claimed = primary_b_vars.claimed = true;
     Client primary_a, primary_b, secondary_a, secondary_b;
@@ -98,8 +104,12 @@ int main()
     vars_b.openerClient = &primary_b;
     uint64_t options;
     IOMemoryDescriptor *result = nullptr;
+    pci_a.sessionOwner = &driver_b;
+    assert(primary_a.copy(10, &options, &result) == kIOReturnNotOpen);
+    assert(primary_a_vars.barDescCache[0] == nullptr && pci_a.copies == 1);
+    pci_a.sessionOwner = &driver_a;
     assert(primary_a.copy(10, &options, &result) == kIOReturnSuccess);
-    assert(result == &a && pci_a.copies == 1);
+    assert(result == &a && pci_a.copies == 2);
     result->release();
     assert(primary_b.copy(10, &options, &result) == kIOReturnSuccess);
     assert(result == &b && pci_b.copies == 1);
@@ -107,7 +117,7 @@ int main()
     assert(secondary_a.copy(10, &options, &result) == kIOReturnNotOpen);
     assert(secondary_b.copy(10, &options, &result) == kIOReturnNotOpen);
     assert(primary_a.copy(10, &options, &result) == kIOReturnSuccess);
-    assert(result == &a && pci_a.copies == 1);
+    assert(result == &a && pci_a.copies == 2);
     result->release();
     assert(primary_b.copy(10, &options, &result) == kIOReturnSuccess);
     assert(result == &b && pci_b.copies == 1);

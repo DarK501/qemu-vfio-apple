@@ -21,6 +21,9 @@ PREFIX = r"""
 typedef int io_connect_t;
 typedef int kern_return_t;
 typedef char gchar;
+typedef void *gpointer;
+typedef struct Notifier Notifier;
+struct Notifier { void (*notify)(Notifier *, void *); };
 enum { IO_OBJECT_NULL = 0, KERN_SUCCESS = 0, kIOReturnStillOpen = 8 };
 typedef struct AppleVFIOSharedDext {
     io_connect_t conn;
@@ -35,12 +38,19 @@ typedef struct GHashTable {
 } GHashTable;
 static GHashTable *apple_vfio_shared_dexts;
 static int disconnects, releases, errors, release_result, close_result;
-static int pending_releases, sleeps;
+static int pending_releases, sleeps, infos, notifier_registrations;
+static Notifier *registered_notifier;
 #define g_new0(type, count) ((type *)calloc((count), sizeof(type)))
 #define g_free free
 #define g_str_hash NULL
 #define g_str_equal NULL
-#define error_report(...) (errors++)
+static void error_report(const char *fmt, ...) { (void)fmt; errors++; }
+static void info_report(const char *fmt, ...) { (void)fmt; infos++; }
+static void qemu_add_exit_notifier(Notifier *notifier)
+{
+    registered_notifier = notifier;
+    notifier_registrations++;
+}
 static void g_usleep(unsigned long usec) { assert(usec == 10000); sleeps++; }
 static gchar *g_strdup_printf(const char *fmt, ...)
 {
@@ -95,6 +105,16 @@ static void g_hash_table_remove(GHashTable *t, const char *key)
     }
     assert(false);
 }
+static void g_hash_table_foreach(GHashTable *t,
+                                 void (*fn)(gpointer, gpointer, gpointer),
+                                 gpointer opaque)
+{
+    for (int i = 0; i < 8; i++) {
+        if (t->keys[i]) {
+            fn(t->keys[i], t->values[i], opaque);
+        }
+    }
+}
 static int disconnect(int conn) {
     assert(conn == 7 || conn == 8); disconnects++; return close_result;
 }
@@ -119,6 +139,7 @@ int main(void)
 {
     assert(apple_vfio_dext_acquire_dma(1, 2, 0, NULL, 0x123) == 0);
     assert(apple_vfio_dext_publish(1, 2, 0, NULL, 0x123, 7));
+    assert(registered_notifier && notifier_registrations == 1);
     assert(!apple_vfio_dext_publish(1, 2, 0, NULL, 0x123, 8));
     assert(apple_vfio_dext_publish(1, 2, 0, "root", 0x456, 8));
     assert(apple_vfio_dext_acquire_dma(1, 2, 0, NULL, 0x456) == 0);
@@ -167,6 +188,19 @@ int main(void)
     pending_releases = 100;
     assert(!apple_vfio_dext_close_connection(8, true));
     assert(releases == 108 && disconnects == 6 && sleeps == 101 && errors == 5);
+    pending_releases = 2;
+    registered_notifier->notify(registered_notifier, NULL);
+    assert(releases == 111 && sleeps == 103 && infos == 1);
+    assert(disconnects == 6 && errors == 5);
+    assert(apple_vfio_dext_publish(1, 2, 0, "root", 0x456, 8));
+    assert(notifier_registrations == 1);
+    pending_releases = 2;
+    registered_notifier->notify(registered_notifier, NULL);
+    assert(releases == 115 && sleeps == 105 && infos == 3);
+    assert(disconnects == 6 && errors == 5);
+    release_result = 9;
+    registered_notifier->notify(registered_notifier, NULL);
+    assert(releases == 117 && errors == 7 && disconnects == 6);
     free(apple_vfio_shared_dexts);
 }
 """
@@ -176,7 +210,7 @@ def main():
     source = SOURCE.read_text()
     key_start = source.index("static gchar *apple_vfio_dext_key(")
     key_end = source.index("\nstatic inline AppleVFIOContainer", key_start)
-    start = source.index("bool apple_vfio_dext_close_connection(")
+    start = source.index("static kern_return_t apple_vfio_dext_release_claim(")
     end = source.index("\n/* ------------------------------------------------------------------ */",
                        start)
     with tempfile.TemporaryDirectory() as directory:

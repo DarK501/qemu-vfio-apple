@@ -2455,8 +2455,9 @@ IMPL(VFIOUserPCIDriverUserClient, CopyClientMemoryForType)
         }
 
         IOMemoryDescriptor *barMemory = nullptr;
+        /* The PCI session was opened by driverService, not this client. */
         ret = pciDevice->_CopyDeviceMemoryWithIndex(memoryIndex,
-                                                    &barMemory, this);
+                                                    &barMemory, driverService);
         if (ret != kIOReturnSuccess || barMemory == nullptr) {
             os_log(OS_LOG_DEFAULT,
                    "vfio-user-dext: _CopyDeviceMemoryWithIndex failed BAR%u idx=%u: %#x",
