@@ -49,6 +49,7 @@ enum {
     kVFIOUserPCIDriverUserClientMethodResetDevice = 17,
     kVFIOUserPCIDriverUserClientMethodProbePCIConfig = 18,
     kVFIOUserPCIDriverUserClientMethodClaimSelected = 19,
+    kVFIOUserPCIDriverUserClientMethodReleaseClaim = 20,
 };
 
 enum {
@@ -520,16 +521,67 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
         return kIOReturnNotOpen;
     }
 
+    if (__atomic_load_n(&driver->ivars->claimBlocked, __ATOMIC_ACQUIRE) ||
+        client->ivars->dmaCompleteFailureCount != 0) {
+        vfio_user_dma_log(
+            "claim release rejected: DMA cleanup is blocked "
+            "(completion_failures=%llu)",
+            client->ivars->dmaCompleteFailureCount);
+        return kIOReturnNotReady;
+    }
+    if (client->ivars->activeDMARegionCount != 0 ||
+        client->ivars->activeDMAChunkCount != 0 ||
+        client->ivars->activeDMABytes != 0 ||
+        client->ivars->dmaBuffer != nullptr ||
+        client->ivars->dmaCommand != nullptr) {
+        vfio_user_dma_log(
+            "claim release rejected: DMA resources remain "
+            "(regions=%llu, chunks=%llu, bytes=%llu, buffer=%d, command=%d)",
+            client->ivars->activeDMARegionCount,
+            client->ivars->activeDMAChunkCount,
+            client->ivars->activeDMABytes,
+            client->ivars->dmaBuffer != nullptr,
+            client->ivars->dmaCommand != nullptr);
+        return kIOReturnStillOpen;
+    }
+
     IOPCIDevice *pciDevice = vfio_user_get_pci_device(driverService);
     if (pciDevice == nullptr) {
         vfio_user_dma_log("claim release: PCI provider is unavailable");
         return kIOReturnNotAttached;
     }
-    os_log(OS_LOG_DEFAULT, "vfio-user-dext: releasing PCI claim; calling Close");
+
+    uint16_t command = 0xffff;
+    pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetCommand, &command);
+    if (command == 0xffff) {
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: claim release could not read PCI command register");
+        return kIOReturnNotReady;
+    }
+    if ((command & 0x04) != 0) {
+        pciDevice->ConfigurationWrite16(kIOPCIConfigurationOffsetCommand,
+                                        command & ~0x04);
+        pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetCommand,
+                                       &command);
+    }
+    os_log(OS_LOG_DEFAULT,
+           "vfio-user-dext: PCI command register after bus-master disable: %#x",
+           command);
+    if (command == 0xffff || (command & 0x04) != 0) {
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: claim release refused; bus mastering remains enabled");
+        return kIOReturnNotReady;
+    }
+
+    os_log(OS_LOG_DEFAULT,
+           "vfio-user-dext: bus mastering verified disabled; releasing PCI claim");
     if (!driver->ivars->startOpen) {
         pciDevice->Close(driverService, 0);
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: PCI claim Close returned");
+    } else {
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: retained Start-time PCI Open; bus mastering is off");
     }
-    os_log(OS_LOG_DEFAULT, "vfio-user-dext: PCI claim Close returned");
     client->ivars->claimed = false;
     __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
     __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
@@ -1920,6 +1972,7 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
         selector != kVFIOUserPCIDriverUserClientMethodClaim &&
         selector != kVFIOUserPCIDriverUserClientMethodProbePCIConfig &&
         selector != kVFIOUserPCIDriverUserClientMethodClaimSelected &&
+        selector != kVFIOUserPCIDriverUserClientMethodReleaseClaim &&
         !vfio_user_service_claimed(this)) {
         return kIOReturnNotOpen;
     }
@@ -1967,6 +2020,9 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     case kVFIOUserPCIDriverUserClientMethodClaim: {
         return vfio_user_claim_device(this, driverService, &identity);
     }
+
+    case kVFIOUserPCIDriverUserClientMethodReleaseClaim:
+        return vfio_user_release_claim(this);
 
     case kVFIOUserPCIDriverUserClientMethodTerminate:
         os_log(OS_LOG_DEFAULT,

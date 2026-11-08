@@ -94,9 +94,13 @@ memory or data if it is not quiescent or properly isolated; the user must
 explicitly confirm the warning. Open, Close, rescan, and device removal can
 disrupt macOS and other devices. The app retains the user-client connection
 until **Release GPU**, window teardown, or process exit; it cannot hand that
-claim to QEMU, so release it before a QEMU claim. The release button requests
-user-client closure; consult dext logs to confirm teardown. A successful claim
-does not validate the guest DMA path or prevent forced DriverKit teardown.
+claim to QEMU directly. Release GPU synchronously asks the dext to reject
+release while DMA resources remain, clear and verify the PCI Bus Master Enable
+bit, and release the app's claim. If any step fails, the app retains its
+connection and reports the failure. The dext retains its Start-time PCI Open
+after a successful app release so it continues to own the nub; a subsequent
+VFIO user client can acquire the released claim. A successful claim does not
+validate the guest DMA path or prevent forced DriverKit teardown.
 The app's `vfio-gpu-claim:` messages and the dext's `vfio-user-dext:` messages
 are recorded by the macOS unified log with timestamps. To capture them:
 

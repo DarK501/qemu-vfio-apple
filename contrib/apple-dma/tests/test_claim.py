@@ -18,7 +18,8 @@ using kern_return_t = int;
 enum { kIOReturnSuccess = 0, kIOReturnBadArgument = 1,
        kIOReturnUnsupported = 2, kIOReturnExclusiveAccess = 3,
        kIOReturnError = 4, kIOReturnNotReady = 5,
-       kIOReturnNotAttached = 6, kIOReturnNotOpen = 7 };
+       kIOReturnNotAttached = 6, kIOReturnNotOpen = 7,
+       kIOReturnStillOpen = 8 };
 #define OS_LOG_DEFAULT 0
 #define os_log(...) ((void)0)
 #define OSDynamicCast(type, value) dynamic_cast<type *>(value)
@@ -64,7 +65,13 @@ struct VFIOUserPCIDriver : IOService {
     VFIOUserPCIDriver_IVars *ivars;
     IOPCIDevice *device;
 };
-struct ClientVars { bool claimed = false; };
+struct ClientVars {
+    bool claimed = false;
+    void *dmaBuffer = nullptr;
+    void *dmaCommand = nullptr;
+    uint64_t activeDMARegionCount = 0, activeDMAChunkCount = 0;
+    uint64_t activeDMABytes = 0, dmaCompleteFailureCount = 0;
+};
 struct VFIOUserPCIDriverUserClient : IOService {
     ClientVars *ivars;
     IOService *provider;
@@ -173,6 +180,7 @@ int main()
     closing.join();
     assert(close_result == kIOReturnSuccess);
     assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 5);
+    assert((pci.command & 0x04) == 0);
     pci.block_open = false;
     pci.block_close = false;
     assert(vfio_user_claim_device(&c2, &driver, &identity) == kIOReturnSuccess);
@@ -186,6 +194,36 @@ int main()
     pci.ignore_writes = true;
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnNotReady);
     assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 7);
+    pci.ignore_writes = false;
+    driver_vars.startOpen = true;
+    assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnSuccess);
+    assert(vars1.claimed && pci.opens == 7 && pci.command == 0x06);
+    driver_vars.claimBlocked = true;
+    assert(vfio_user_release_claim(&c1) == kIOReturnNotReady);
+    assert(vars1.claimed && driver_vars.openerClient == &c1 &&
+           (pci.command & 0x04) != 0);
+    driver_vars.claimBlocked = false;
+    vars1.dmaBuffer = &pci;
+    assert(vfio_user_release_claim(&c1) == kIOReturnStillOpen);
+    assert(vars1.claimed && driver_vars.openerClient == &c1);
+    vars1.dmaBuffer = nullptr;
+    vars1.dmaCommand = &pci;
+    assert(vfio_user_release_claim(&c1) == kIOReturnStillOpen);
+    assert(vars1.claimed && driver_vars.openerClient == &c1);
+    vars1.dmaCommand = nullptr;
+    vars1.activeDMARegionCount = 1;
+    assert(vfio_user_release_claim(&c1) == kIOReturnStillOpen);
+    assert(vars1.claimed && driver_vars.openerClient == &c1 &&
+           (pci.command & 0x04) != 0);
+    vars1.activeDMARegionCount = 0;
+    pci.ignore_writes = true;
+    assert(vfio_user_release_claim(&c1) == kIOReturnNotReady);
+    assert(vars1.claimed && driver_vars.openerClient == &c1 &&
+           (pci.command & 0x04) != 0);
+    pci.ignore_writes = false;
+    assert(vfio_user_release_claim(&c1) == kIOReturnSuccess);
+    assert(!vars1.claimed && !driver_vars.openerClient);
+    assert(pci.opens == 7 && pci.closes == 7 && (pci.command & 0x04) == 0);
 }
 """
 

@@ -258,14 +258,26 @@ final class GPUClaimManager: ObservableObject {
 
     func release() {
         guard !busy, held else { return }
-        let kr = IOServiceClose(connection)
-        if kr == KERN_SUCCESS {
-            connection = 0
-            held = false
-            message = "User-client close requested; check the dext log for PCI Close."
-        } else {
-            message = "User-client close failed (\(errorCode(kr))); claim state is uncertain."
+        busy = true
+        let currentConnection = connection
+        DispatchQueue.global(qos: .userInitiated).async {
+            let releaseResult = IOConnectCallScalarMethod(
+                currentConnection, 20, nil, 0, nil, nil)
+            let closeResult = releaseResult == KERN_SUCCESS
+                ? IOServiceClose(currentConnection) : releaseResult
+            DispatchQueue.main.async {
+                self.busy = false
+                if releaseResult != KERN_SUCCESS {
+                    self.message = "GPU release failed (\(errorCode(releaseResult))); bus mastering may still be enabled. Claim retained."
+                } else if closeResult != KERN_SUCCESS {
+                    self.message = "Bus mastering was verified off, but user-client close failed (\(errorCode(closeResult))). Connection retained; retry Release GPU."
+                } else {
+                    self.connection = 0
+                    self.held = false
+                    self.message = "GPU claim released; bus mastering is off. The dext retains its Start-time PCI Open."
+                }
+                NSLog("vfio-gpu-claim: %@", self.message)
+            }
         }
-        NSLog("vfio-gpu-claim: %@", message)
     }
 }
