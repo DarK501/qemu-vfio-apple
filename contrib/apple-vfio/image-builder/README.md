@@ -84,11 +84,10 @@ without a guest. Do not run a guest using the physical device or attempt DMA
 while the safety blocker remains.
 
 The host app also offers an explicit **Claim GPU** button. It selects a display
-device by registry identity, checks that it has no other direct PCI services,
-and, if no VFIO service is present, requests a PCI rescan and waits up to five
-seconds for one. The rescan can affect other devices and can fail to produce
-a VFIO match. The child-service check is only a snapshot, not proof that the
-device is unowned or quiescent. If VFIO matches, the app requests a retained
+device by registry identity and, if no VFIO service is present, requests a PCI
+rescan and waits up to five seconds for one. It attempts the rescan and claim
+even if other services are attached. The rescan can affect other devices and
+can fail to produce a VFIO match. If VFIO matches, the app requests a retained
 PCI Open and enables memory-space decoding and bus mastering, verifying the
 command bits after the write. This can let the device initiate DMA and corrupt
 memory or data if it is not quiescent or properly isolated; the user must
@@ -118,9 +117,9 @@ DriverKit Open can map device memory, and Close can clear bus-master and memory
 enable bits. The probe does not set those bits, but they might already be set.
 It does not prove that the device is quiescent or that DMA is safe.
 
-For an explicitly selected PCI registry entry with no direct child services,
-`scripts/rescan-pci.c` offers an opt-in PCI rescan request. It requires the
-exact BDF and vendor/device IDs, rejects ambiguous BDFs and attached services,
+For an explicitly selected PCI registry entry, `scripts/rescan-pci.c` offers
+an opt-in PCI rescan request. It requires the exact BDF and vendor/device IDs,
+rejects ambiguous BDFs, and may rescan even when other services are attached,
 and does not open or claim the device. Compile it from the repository root:
 
 ```sh
@@ -130,8 +129,8 @@ clang -std=c11 -Wall -Wextra -Werror -framework IOKit -framework CoreFoundation 
 
 For example, `/tmp/vfio-rescan-pci 44:00.0 1002:731f --confirm-rescan`
 requests a scan on that entry. A scan can reconfigure PCI resources or affect
-other devices, even though it targets a specific entry. Its pre-check is a
-snapshot, not a guarantee of quiescence. It may fail, remove the entry,
+other devices, even though it targets a specific entry. It does not check
+for quiescence. It may fail, remove the entry,
 re-attach macOS drivers, or have no effect. A successful request does not
 prove that VFIO matched or that PCI Open succeeded; inspect `list-devices`.
 Do not use the normal claim or guest DMA to check the outcome.

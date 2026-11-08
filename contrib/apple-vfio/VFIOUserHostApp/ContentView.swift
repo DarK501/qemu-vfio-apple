@@ -214,8 +214,10 @@ private struct GPUClaimRow: View {
         let alert = NSAlert()
         alert.messageText = "Claim GPU and enable bus mastering?"
         alert.informativeText = """
-            If no service is attached, this requests a PCI rescan and waits briefly \
-            for VFIO to match. A rescan can affect other devices. Open and Close \
+            If no VFIO service is attached, this requests a PCI rescan and waits \
+            briefly for VFIO to match, even if other services are attached. A \
+            rescan can affect other devices. Open is attempted even when other \
+            services are present. Open and Close \
             can change GPU state and interrupt applications or displays. This \
             enables bus mastering: the GPU may initiate DMA and corrupt memory \
             or data if it is not quiescent or properly isolated. Release the GPU \

@@ -119,22 +119,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    io_iterator_t children = IO_OBJECT_NULL;
-    kr = IORegistryEntryGetChildIterator(selected, kIOServicePlane, &children);
-    if (kr != KERN_SUCCESS) {
-        fprintf(stderr, "Rescan aborted: child lookup failed: %#x\n", kr);
-        IOObjectRelease(selected);
-        return 1;
-    }
-    io_object_t child = IOIteratorNext(children);
-    IOObjectRelease(children);
-    if (child) {
-        IOObjectRelease(child);
-        IOObjectRelease(selected);
-        fprintf(stderr, "Rescan aborted: target has an attached service\n");
-        return 1;
-    }
-
     printf("Requesting PCI rescan at %02x:%02x.%x %04x:%04x. "
            "Other PCI devices may be affected.\n", bus, dev, fn, vendor, product);
     fflush(stdout);

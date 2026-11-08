@@ -132,26 +132,20 @@ nonisolated private func vfioChild(_ pci: io_service_t) throws -> io_service_t? 
     }
     defer { IOObjectRelease(iterator) }
     var selected: io_service_t = 0
-    var otherCount = 0
     var child = IOIteratorNext(iterator)
     while child != 0 {
         defer { IOObjectRelease(child); child = IOIteratorNext(iterator) }
-        do {
-            let dict = try properties(child)
-            if dict["IOUserClass"] as? String == "VFIOUserPCIDriver", selected == 0 {
-                IOObjectRetain(child)
-                selected = child
-            } else {
-                otherCount += 1
+        let value = IORegistryEntryCreateCFProperty(child, "IOUserClass" as CFString,
+                                                    kCFAllocatorDefault, 0)
+        if let cls = value?.takeRetainedValue() as? String,
+           cls == "VFIOUserPCIDriver" {
+            if selected != 0 {
+                IOObjectRelease(selected)
+                throw GPUClaimError.message("Multiple VFIO services matched the selected GPU; claim aborted.")
             }
-        } catch {
-            if selected != 0 { IOObjectRelease(selected) }
-            throw error
+            IOObjectRetain(child)
+            selected = child
         }
-    }
-    guard otherCount == 0 else {
-        if selected != 0 { IOObjectRelease(selected) }
-        throw GPUClaimError.message("GPU has other attached services; no PCI Open was attempted.")
     }
     return selected == 0 ? nil : selected
 }
@@ -166,6 +160,7 @@ nonisolated private func claimGPU(_ target: ClaimGPU) throws -> (io_connect_t, S
         guard kr == KERN_SUCCESS else {
             throw GPUClaimError.message("PCI rescan failed (\(errorCode(kr)); no PCI Open attempted).")
         }
+        NSLog("vfio-gpu-claim: PCI rescan request returned success for %@", target.label)
         let deadline = ProcessInfo.processInfo.systemUptime + 5
         repeat {
             Thread.sleep(forTimeInterval: 0.05)

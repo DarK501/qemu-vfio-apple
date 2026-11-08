@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise the PCI rescan guard and request using mocked IOKit."""
+"""Exercise PCI rescan selection and request using mocked IOKit."""
 
 import pathlib
 import subprocess
@@ -55,7 +55,7 @@ HARNESS = r"""
 #undef main
 
 static int device_count = 1, index_value, has_child, identity_bad;
-static int child_error, scan_error, scans;
+static int child_error, child_lookups, scan_error, scans;
 static unsigned int last_options;
 static const char *debug_value = "68:0:0";
 static unsigned char vendor_data[2] = {0x02, 0x10};
@@ -90,7 +90,7 @@ CFTypeRef IORegistryEntryCreateCFProperty(io_service_t s, CFStringRef key, void 
     return NULL;
 }
 kern_return_t IORegistryEntryGetChildIterator(io_service_t s, const char *plane, io_iterator_t *it) {
-    (void)s; (void)plane; *it = 11; return child_error;
+    (void)s; (void)plane; child_lookups++; *it = 11; return child_error;
 }
 kern_return_t IOServiceRequestProbe(io_service_t s, unsigned int opts) {
     assert(s == 1); scans++; last_options = opts; return scan_error;
@@ -107,19 +107,19 @@ int main(void) {
     device_count = 1; identity_bad = 1;
     assert(rescan_main(4, args) == 1 && scans == 1);
     identity_bad = 0; has_child = 1;
-    assert(rescan_main(4, args) == 1 && scans == 1);
+    assert(rescan_main(4, args) == 0 && scans == 2);
     child_error = 1;
-    assert(rescan_main(4, args) == 1 && scans == 1);
+    assert(rescan_main(4, args) == 0 && scans == 3 && child_lookups == 0);
     child_error = 0; scan_error = 42;
-    assert(rescan_main(4, args) == 1 && scans == 2);
+    assert(rescan_main(4, args) == 1 && scans == 4);
     scan_error = 0; debug_value = "68:0:0(0:1)";
-    assert(rescan_main(4, args) == 0 && scans == 3);
+    assert(rescan_main(4, args) == 0 && scans == 5);
     debug_value = "68:0:0garbage";
-    assert(rescan_main(4, args) == 1 && scans == 3);
+    assert(rescan_main(4, args) == 1 && scans == 5);
     args[3] = "--wrong";
-    assert(rescan_main(4, args) == 2 && scans == 3);
+    assert(rescan_main(4, args) == 2 && scans == 5);
     args[3] = "--confirm-rescan"; args[1] = "44:20.0";
-    assert(rescan_main(4, args) == 2 && scans == 3);
+    assert(rescan_main(4, args) == 2 && scans == 5);
     return 0;
 }
 """
