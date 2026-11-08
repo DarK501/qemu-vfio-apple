@@ -42,11 +42,11 @@
 
 /*
  * This module hooks per-device dma_map_ops, which requires the dma_ops field
- * in struct device. That field is only available when the target kernel
- * enables CONFIG_ARCH_HAS_DMA_OPS.
+ * in struct device. Older kernels guard that field with CONFIG_DMA_OPS;
+ * newer kernels use CONFIG_ARCH_HAS_DMA_OPS.
  */
-#ifndef CONFIG_ARCH_HAS_DMA_OPS
-#error "apple_dma requires a kernel with CONFIG_ARCH_HAS_DMA_OPS enabled"
+#if !defined(CONFIG_ARCH_HAS_DMA_OPS) && !defined(CONFIG_DMA_OPS)
+#error "apple_dma requires per-device DMA operations in struct device"
 #endif
 
 /*

@@ -25,6 +25,10 @@ non-identity original scatter-gather mappings, a direct SG backend without
 DMA operations, and host mappings whose segments are not contiguous for a
 single guest range. It also requires a kernel with per-device DMA operations.
 These limitations can prevent passthrough workloads from working.
+The guest module compiles against Ubuntu x86_64 6.8, 6.17, and
+7.0.0-43-generic (26.04) kernel headers; that does not validate loading or
+DMA. Older kernels expose per-device DMA operations under `CONFIG_DMA_OPS`,
+while newer kernels use `CONFIG_ARCH_HAS_DMA_OPS`.
 
 The DMA companion must share the matching `vfio-apple-pci` connection; the
 normal `dma-companion=on` configuration creates it automatically. Standalone
