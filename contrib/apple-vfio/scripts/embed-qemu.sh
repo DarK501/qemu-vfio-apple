@@ -124,20 +124,20 @@ mkdir -p "$MACOS_DIR" "$LIB_DIR" "$SHARE_DIR"
 # (the hex SHA1) and EXPANDED_CODE_SIGN_IDENTITY_NAME (human readable).
 # Either works for codesign.
 SIGN_ID="${EXPANDED_CODE_SIGN_IDENTITY:-${CODE_SIGN_IDENTITY:-}}"
-if [ -z "$SIGN_ID" ] || [ "${CODE_SIGNING_REQUIRED:-YES}" = "NO" ]; then
+if [ -z "$SIGN_ID" ] || [ "${CODE_SIGNING_REQUIRED:-YES}" = "NO" ] ||
+   [ "${CODE_SIGNING_ALLOWED:-YES}" = "NO" ]; then
     SIGN_ID="-"
 fi
 
 # Debug builds skip the timestamp server (no network); Release uses the default
 # timestamp so the signature can be notarized later.
-TS_OPT=()
+SIGN_OPTS=(--force --sign "$SIGN_ID")
 if [ "${CONFIGURATION:-Debug}" = "Debug" ]; then
-    TS_OPT=(--timestamp=none)
+    SIGN_OPTS+=(--timestamp=none)
 fi
 
-RUNTIME_OPT=()
 if [ "$SIGN_ID" != "-" ]; then
-    RUNTIME_OPT=(--options runtime)
+    SIGN_OPTS+=(--options runtime)
 fi
 
 for binary in "${QEMU_BINARIES[@]}"; do
@@ -186,17 +186,17 @@ fi
 echo "embed-qemu: signing dylibs (identity: $SIGN_ID)"
 for dylib in "$LIB_DIR"/*.dylib; do
     [ -f "$dylib" ] || continue
-    codesign --force --sign "$SIGN_ID" "${TS_OPT[@]}" "${RUNTIME_OPT[@]}" "$dylib"
+    codesign "${SIGN_OPTS[@]}" "$dylib"
 done
 
 echo "embed-qemu: signing qemu-img (identity: $SIGN_ID)"
-codesign --force --sign "$SIGN_ID" "${TS_OPT[@]}" "${RUNTIME_OPT[@]}" \
+codesign "${SIGN_OPTS[@]}" \
     "$MACOS_DIR/qemu-img"
 
 for binary in "${QEMU_BINARIES[@]}"; do
     name="$(basename "$binary")"
     echo "embed-qemu: signing $name (identity: $SIGN_ID, entitlements: hypervisor)"
-    codesign --force --sign "$SIGN_ID" "${TS_OPT[@]}" "${RUNTIME_OPT[@]}" \
+    codesign "${SIGN_OPTS[@]}" \
         --entitlements "$ENTITLEMENTS" "$MACOS_DIR/$name"
 done
 
