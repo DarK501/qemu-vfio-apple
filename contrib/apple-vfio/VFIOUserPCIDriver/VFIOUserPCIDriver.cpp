@@ -48,6 +48,7 @@ enum {
     kVFIOUserPCIDriverUserClientMethodSetIRQMask = 16,
     kVFIOUserPCIDriverUserClientMethodResetDevice = 17,
     kVFIOUserPCIDriverUserClientMethodProbePCIConfig = 18,
+    kVFIOUserPCIDriverUserClientMethodClaimSelected = 19,
 };
 
 enum {
@@ -475,6 +476,13 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
             os_log(OS_LOG_DEFAULT,
                    "vfio-user-dext: PCI command register after enable: %#x", cmd);
         }
+        if (cmd == 0xffff || (cmd & 0x06) != 0x06) {
+            os_log(OS_LOG_DEFAULT,
+                   "vfio-user-dext: PCI memory space or bus mastering did not enable");
+            pciDevice->Close(client, 0);
+            __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
+            return kIOReturnNotReady;
+        }
     }
 
     client->ivars->claimed = true;
@@ -516,7 +524,9 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
         vfio_user_dma_log("claim release: PCI provider is unavailable");
         return kIOReturnNotAttached;
     }
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: releasing PCI claim; calling Close");
     pciDevice->Close(client, 0);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: PCI claim Close returned");
     client->ivars->claimed = false;
     __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
     __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
@@ -576,6 +586,15 @@ vfio_user_probe_pci_config(VFIOUserPCIDriverUserClient *client,
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe Close returned; result=%#x", ret);
     __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
     return ret;
+}
+
+static bool
+vfio_user_identity_matches_input(const VFIOUserPCIDeviceIdentity *identity,
+                                 const uint64_t *input)
+{
+    return input[0] == identity->bus && input[1] == identity->device &&
+           input[2] == identity->function && input[3] == identity->vendorID &&
+           input[4] == identity->deviceID;
 }
 
 static kern_return_t
@@ -1886,25 +1905,32 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     if (selector != kVFIOUserPCIDriverUserClientMethodGetIdentity &&
         selector != kVFIOUserPCIDriverUserClientMethodClaim &&
         selector != kVFIOUserPCIDriverUserClientMethodProbePCIConfig &&
+        selector != kVFIOUserPCIDriverUserClientMethodClaimSelected &&
         !vfio_user_service_claimed(this)) {
         return kIOReturnNotOpen;
     }
 
     switch (selector) {
     case kVFIOUserPCIDriverUserClientMethodProbePCIConfig:
+    case kVFIOUserPCIDriverUserClientMethodClaimSelected:
         if (arguments->scalarInput == nullptr || arguments->scalarInputCount != 5 ||
             arguments->scalarOutput == nullptr || arguments->scalarOutputCount < 3) {
             return kIOReturnBadArgument;
         }
-        if (arguments->scalarInput[0] != identity.bus ||
-            arguments->scalarInput[1] != identity.device ||
-            arguments->scalarInput[2] != identity.function ||
-            arguments->scalarInput[3] != identity.vendorID ||
-            arguments->scalarInput[4] != identity.deviceID) {
+        if (!vfio_user_identity_matches_input(&identity, arguments->scalarInput)) {
             return kIOReturnNotReady;
         }
-        ret = vfio_user_probe_pci_config(this, driverService, &identity,
-                                          arguments->scalarOutput);
+        if (selector == kVFIOUserPCIDriverUserClientMethodProbePCIConfig) {
+            ret = vfio_user_probe_pci_config(this, driverService, &identity,
+                                             arguments->scalarOutput);
+        } else {
+            ret = vfio_user_claim_device(this, driverService, &identity);
+            if (ret == kIOReturnSuccess) {
+                arguments->scalarOutput[0] = identity.vendorID;
+                arguments->scalarOutput[1] = identity.deviceID;
+                arguments->scalarOutput[2] = 0x06;
+            }
+        }
         if (ret == kIOReturnSuccess) {
             arguments->scalarOutputCount = 3;
         }

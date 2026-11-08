@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var activationManager = SystemExtensionActivationManager.shared
+    @StateObject private var gpuClaimManager = GPUClaimManager()
     @State private var layout = BundleLayout.current
     @State private var cliStateForBundle: CliState = .missing
     @State private var statusMessage: String = ""
@@ -23,7 +24,10 @@ struct ContentView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 LocationRow(layout: layout)
-                ExtensionRow(activationManager: activationManager)
+                ExtensionRow(activationManager: activationManager,
+                             claimInUse: gpuClaimManager.busy || gpuClaimManager.held)
+                GPUClaimRow(manager: gpuClaimManager,
+                            extensionActive: activationManager.isExtensionKnownActive)
                 if hasAnyBundledTool {
                     CliRow(
                         layout: layout,
@@ -45,6 +49,7 @@ struct ContentView: View {
         .frame(minWidth: 540, idealWidth: 580, minHeight: 360, idealHeight: 400)
         .onAppear {
             refreshState()
+            gpuClaimManager.refresh()
             startPolling()
         }
         .onDisappear { stopPolling() }
@@ -55,7 +60,7 @@ struct ContentView: View {
             Text("QEMU VFIO Setup")
                 .font(.title2)
                 .fontWeight(.semibold)
-            Text("This app installs a DriverKit system extension that lets QEMU pass PCI devices through to virtual machines on Apple Silicon. macOS requires the installer to live inside an app bundle in /Applications.")
+            Text("This app installs the experimental DriverKit PCI passthrough extension. macOS requires the installer to live inside an app bundle in /Applications.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -172,6 +177,57 @@ struct ContentView: View {
     }
 }
 
+private struct GPUClaimRow: View {
+    @ObservedObject var manager: GPUClaimManager
+    let extensionActive: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("GPU claim").font(.callout).fontWeight(.medium)
+            HStack {
+                Picker("GPU", selection: $manager.selectedID) {
+                    Text("Select a GPU").tag(nil as UInt64?)
+                    ForEach(manager.devices) { device in
+                        Text(device.label).tag(Optional(device.id))
+                    }
+                }
+                .disabled(manager.busy || manager.held)
+                Button("Refresh") { manager.refresh() }
+                    .disabled(manager.busy || manager.held)
+                if manager.held {
+                    Button("Release GPU") { manager.release() }
+                        .disabled(manager.busy)
+                } else {
+                    Button("Claim GPU") { confirmClaim() }
+                        .disabled(manager.busy || manager.selectedID == nil || !extensionActive)
+                }
+            }
+            Text(manager.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func confirmClaim() {
+        let alert = NSAlert()
+        alert.messageText = "Claim GPU and enable bus mastering?"
+        alert.informativeText = """
+            If no service is attached, this requests a PCI rescan and waits briefly \
+            for VFIO to match. A rescan can affect other devices. Open and Close \
+            can change GPU state and interrupt applications or displays. This \
+            enables bus mastering: the GPU may initiate DMA and corrupt memory \
+            or data if it is not quiescent or properly isolated. Release the GPU \
+            before starting QEMU. The guest DMA path remains unsafe and unverified.
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Claim GPU")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { manager.claim() }
+    }
+}
+
 // MARK: - Row: Location
 
 private struct LocationRow: View {
@@ -205,6 +261,7 @@ private struct LocationRow: View {
 
 private struct ExtensionRow: View {
     @ObservedObject var activationManager: SystemExtensionActivationManager
+    let claimInUse: Bool
 
     var body: some View {
         if activationManager.isExtensionKnownActive {
@@ -216,7 +273,7 @@ private struct ExtensionRow: View {
                 Button("Uninstall Driver") { confirmAndDeactivate() }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-                    .disabled(activationManager.requestInFlight)
+                    .disabled(activationManager.requestInFlight || claimInUse)
             }
         } else if activationManager.isExtensionWaitingForApproval {
             ChecklistRow(

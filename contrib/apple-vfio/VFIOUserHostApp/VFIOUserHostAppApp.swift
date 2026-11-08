@@ -2,9 +2,8 @@
 //  VFIOUserHostAppApp.swift
 //  VFIOUserHostApp
 //
-//  Setup-only host app for the VFIOUserPCIDriver dext. Real device interaction
-//  happens out-of-process via host-native QEMU (bundled under Contents/MacOS)
-//  by the "Embed QEMU" build phase).
+//  Setup app for the VFIOUserPCIDriver dext, with an explicit GPU claim action.
+//  QEMU runs out-of-process and must acquire its own device claim.
 //
 
 import AppKit

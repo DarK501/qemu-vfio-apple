@@ -79,8 +79,33 @@ metadata, not live configuration space. A normal claim opens the PCI device
 and checks live vendor/device and command values against the registry before
 enabling bus mastering. Opening and closing a PCI device can themselves alter
 its state and do not establish device quiescence. The existing claim
-operation enables bus mastering: do not invoke it, run a guest using the
-physical device, or attempt DMA while the safety blocker remains.
+operation enables bus mastering, which can allow device-initiated DMA even
+without a guest. Do not run a guest using the physical device or attempt DMA
+while the safety blocker remains.
+
+The host app also offers an explicit **Claim GPU** button. It selects a display
+device by registry identity, checks that it has no other direct PCI services,
+and, if no VFIO service is present, requests a PCI rescan and waits up to five
+seconds for one. The rescan can affect other devices and can fail to produce
+a VFIO match. The child-service check is only a snapshot, not proof that the
+device is unowned or quiescent. If VFIO matches, the app requests a retained
+PCI Open and enables memory-space decoding and bus mastering, verifying the
+command bits after the write. This can let the device initiate DMA and corrupt
+memory or data if it is not quiescent or properly isolated; the user must
+explicitly confirm the warning. Open, Close, rescan, and device removal can
+disrupt macOS and other devices. The app retains the user-client connection
+until **Release GPU**, window teardown, or process exit; it cannot hand that
+claim to QEMU, so release it before a QEMU claim. The release button requests
+user-client closure; consult dext logs to confirm teardown. A successful claim
+does not validate the guest DMA path or prevent forced DriverKit teardown.
+The app's `vfio-gpu-claim:` messages and the dext's `vfio-user-dext:` messages
+are recorded by the macOS unified log with timestamps. To capture them:
+
+```sh
+sudo log show --last 15m --info --style compact \
+  --predicate 'eventMessage CONTAINS[c] "vfio-gpu-claim:" OR eventMessage CONTAINS[c] "vfio-user-dext:"' \
+  > ~/Desktop/vfio-gpu-claim.log
+```
 
 For an explicitly chosen device, the standalone `scripts/probe-pci-config.c`
 tool can request a one-shot live vendor/device/command read. It requires an

@@ -30,7 +30,7 @@ struct IOPCIDevice {
     std::atomic<int> opens {0}, closes {0};
     std::atomic<bool> block_open {false}, in_open {false}, open_continue {false};
     std::atomic<bool> block_close {false}, in_close {false}, close_continue {false};
-    bool fail_open = false;
+    bool fail_open = false, ignore_writes = false;
     uint16_t vendor = 0x1002, device = 0x731f, command = 0;
     int writes = 0;
     int Open(VFIOUserPCIDriverUserClient *, int) {
@@ -51,7 +51,9 @@ struct IOPCIDevice {
     void ConfigurationRead16(int offset, uint16_t *value) {
         *value = offset == 0 ? vendor : offset == 2 ? device : command;
     }
-    void ConfigurationWrite16(int, uint16_t value) { writes++; command = value; }
+    void ConfigurationWrite16(int, uint16_t value) {
+        writes++; if (!ignore_writes) command = value;
+    }
 };
 struct VFIOUserPCIDriver_IVars {
     VFIOUserPCIDriverUserClient *openerClient = nullptr;
@@ -92,6 +94,14 @@ int main()
     c2.ivars = &vars2; c2.provider = &driver;
     VFIOUserPCIDeviceIdentity identity = {};
     identity.vendorID = 0x1002; identity.deviceID = 0x731f;
+
+    uint64_t selected[5] = {0, 0, 0, 0x1002, 0x731f};
+    assert(vfio_user_identity_matches_input(&identity, selected));
+    for (int i = 0; i < 5; i++) {
+        selected[i] ^= 1;
+        assert(!vfio_user_identity_matches_input(&identity, selected));
+        selected[i] ^= 1;
+    }
 
     uint64_t probe[3] = {};
     assert(vfio_user_probe_pci_config(&c1, &driver, &identity, probe) == kIOReturnSuccess);
@@ -170,6 +180,11 @@ int main()
     driver_vars.claimBlocked = true;
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnNotReady);
     assert(!driver_vars.openerClient && !vars1.claimed && pci.opens == 6);
+    driver_vars.claimBlocked = false;
+    pci.command = 0;
+    pci.ignore_writes = true;
+    assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnNotReady);
+    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 7);
 }
 """
 
