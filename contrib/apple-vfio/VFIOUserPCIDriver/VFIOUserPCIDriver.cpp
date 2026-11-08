@@ -91,6 +91,7 @@ struct VFIOUserClientDMARegion {
 struct VFIOUserPCIDriver_IVars {
     VFIOUserPCIDriverUserClient *openerClient;
     bool claimBlocked;
+    bool startOpen;
 };
 
 struct VFIOUserPCIDriverUserClient_IVars {
@@ -434,15 +435,15 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: claim opening PCI device %02x:%02x.%u (enables bus mastering after open)",
            (unsigned int)identity->bus, (unsigned int)identity->device,
            (unsigned int)identity->function);
-    ret = pciDevice->Open(driverService, 0);
-    os_log(OS_LOG_DEFAULT, "vfio-user-dext: claim PCI Open returned %#x", ret);
+    ret = driver->ivars->startOpen ? kIOReturnSuccess : pciDevice->Open(driverService, 0);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: claim PCI Open returned %#x (held since Start: %d)", ret, (int)driver->ivars->startOpen);
     if (ret != kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: failed to open PCI device for %02x:%02x.%u: %#x",
                (unsigned int)identity->bus,
                (unsigned int)identity->device,
                (unsigned int)identity->function, ret);
-        pciDevice->Close(driverService, 0);
+        if (!driver->ivars->startOpen) pciDevice->Close(driverService, 0);
         __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
         return ret;
     }
@@ -463,7 +464,7 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
                    (unsigned int)identity->vendorID,
                    (unsigned int)identity->deviceID,
                    (unsigned int)vendor, (unsigned int)device, (unsigned int)cmd);
-            pciDevice->Close(driverService, 0);
+            if (!driver->ivars->startOpen) pciDevice->Close(driverService, 0);
             __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
             return kIOReturnNotReady;
         }
@@ -479,7 +480,7 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
         if (cmd == 0xffff || (cmd & 0x06) != 0x06) {
             os_log(OS_LOG_DEFAULT,
                    "vfio-user-dext: PCI memory space or bus mastering did not enable");
-            pciDevice->Close(driverService, 0);
+            if (!driver->ivars->startOpen) pciDevice->Close(driverService, 0);
             __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
             return kIOReturnNotReady;
         }
@@ -525,7 +526,9 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
         return kIOReturnNotAttached;
     }
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: releasing PCI claim; calling Close");
-    pciDevice->Close(driverService, 0);
+    if (!driver->ivars->startOpen) {
+        pciDevice->Close(driverService, 0);
+    }
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: PCI claim Close returned");
     client->ivars->claimed = false;
     __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
@@ -1401,6 +1404,10 @@ IMPL(VFIOUserPCIDriver, Start)
         }
     }
 
+    ret = pciDevice->Open(this, 0);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start early PCI Open returned %#x", ret);
+    ivars->startOpen = (ret == kIOReturnSuccess);
+
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start calling RegisterService");
     RegisterService();
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start registered; returning success");
@@ -1445,6 +1452,13 @@ IMPL(VFIOUserPCIDriver, Stop)
                "vfio-user-dext: provider stop request rejected while PCI "
                "device remains claimed; DriverKit may still force teardown");
         return kIOReturnStillOpen;
+    }
+    if (ivars != nullptr && ivars->startOpen) {
+        IOPCIDevice *stopDevice = vfio_user_get_pci_device(this);
+        if (stopDevice != nullptr) {
+            stopDevice->Close(this, 0);
+            os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop closed early PCI Open");
+        }
     }
     IOSafeDeleteNULL(ivars, VFIOUserPCIDriver_IVars, 1);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop calling super");

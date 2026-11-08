@@ -21,9 +21,15 @@ struct VFIOUserPCIDriverUserClient {};
 struct IOService {};
 struct VFIOUserPCIDriver_IVars {
     VFIOUserPCIDriverUserClient *openerClient = nullptr;
+    bool startOpen = false;
 };
-struct VFIOUserPCIDriver {
+struct IOPCIDevice { int closes = 0; void Close(IOService *, int) { closes++; } };
+struct VFIOUserPCIDriver;
+static IOPCIDevice g_pci;
+static IOPCIDevice *vfio_user_get_pci_device(VFIOUserPCIDriver *) { return &g_pci; }
+struct VFIOUserPCIDriver : IOService {
     VFIOUserPCIDriver_IVars *ivars;
+    explicit VFIOUserPCIDriver(VFIOUserPCIDriver_IVars *v) : ivars(v) {}
     kern_return_t Stop(IOService *);
 };
 static int super_stop(IOService *, int) { super_stops++; return 0; }
@@ -38,7 +44,7 @@ int main()
     VFIOUserPCIDriver_IVars vars;
     VFIOUserPCIDriverUserClient owner;
     vars.openerClient = &owner;
-    VFIOUserPCIDriver driver { &vars };
+    VFIOUserPCIDriver driver(&vars);
     IOService provider;
     assert(driver.Stop(&provider) == kIOReturnStillOpen);
     assert(driver.ivars == &vars && vars.openerClient == &owner);
@@ -46,6 +52,12 @@ int main()
     vars.openerClient = nullptr;
     assert(driver.Stop(&provider) == kIOReturnSuccess);
     assert(!driver.ivars && deleted == 1 && super_stops == 1);
+    assert(g_pci.closes == 0);
+    VFIOUserPCIDriver_IVars held;
+    held.startOpen = true;
+    VFIOUserPCIDriver driver2(&held);
+    assert(driver2.Stop(&provider) == kIOReturnSuccess);
+    assert(g_pci.closes == 1);
 }
 """
 

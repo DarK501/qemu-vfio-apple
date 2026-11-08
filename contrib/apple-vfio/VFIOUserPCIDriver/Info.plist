@@ -12,6 +12,8 @@
 			<string>0x731F1002</string>
 			<key>IOPCITunnelCompatible</key>
 			<true/>
+			<key>IOProbeScore</key>
+			<integer>10000</integer>
 			<key>IOProviderClass</key>
 			<string>IOPCIDevice</string>
 			<key>IOUserClass</key>

@@ -58,6 +58,7 @@ struct IOPCIDevice {
 struct VFIOUserPCIDriver_IVars {
     VFIOUserPCIDriverUserClient *openerClient = nullptr;
     bool claimBlocked = false;
+    bool startOpen = false;
 };
 struct VFIOUserPCIDriver : IOService {
     VFIOUserPCIDriver_IVars *ivars;
