@@ -434,7 +434,7 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: claim opening PCI device %02x:%02x.%u (enables bus mastering after open)",
            (unsigned int)identity->bus, (unsigned int)identity->device,
            (unsigned int)identity->function);
-    ret = pciDevice->Open(client, 0);
+    ret = pciDevice->Open(driverService, 0);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: claim PCI Open returned %#x", ret);
     if (ret != kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT,
@@ -442,7 +442,7 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
                (unsigned int)identity->bus,
                (unsigned int)identity->device,
                (unsigned int)identity->function, ret);
-        pciDevice->Close(client, 0);
+        pciDevice->Close(driverService, 0);
         __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
         return ret;
     }
@@ -463,7 +463,7 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
                    (unsigned int)identity->vendorID,
                    (unsigned int)identity->deviceID,
                    (unsigned int)vendor, (unsigned int)device, (unsigned int)cmd);
-            pciDevice->Close(client, 0);
+            pciDevice->Close(driverService, 0);
             __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
             return kIOReturnNotReady;
         }
@@ -479,7 +479,7 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
         if (cmd == 0xffff || (cmd & 0x06) != 0x06) {
             os_log(OS_LOG_DEFAULT,
                    "vfio-user-dext: PCI memory space or bus mastering did not enable");
-            pciDevice->Close(client, 0);
+            pciDevice->Close(driverService, 0);
             __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
             return kIOReturnNotReady;
         }
@@ -525,7 +525,7 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
         return kIOReturnNotAttached;
     }
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: releasing PCI claim; calling Close");
-    pciDevice->Close(client, 0);
+    pciDevice->Close(driverService, 0);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: PCI claim Close returned");
     client->ivars->claimed = false;
     __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
@@ -562,7 +562,7 @@ vfio_user_probe_pci_config(VFIOUserPCIDriverUserClient *client,
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe opening %02x:%02x.%u",
            (unsigned int)identity->bus, (unsigned int)identity->device,
            (unsigned int)identity->function);
-    kern_return_t ret = pciDevice->Open(client, 0);
+    kern_return_t ret = pciDevice->Open(service, 0);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe Open returned %#x", ret);
     if (ret == kIOReturnSuccess) {
         uint16_t vendor = 0xffff, device = 0xffff, command = 0xffff;
@@ -582,7 +582,7 @@ vfio_user_probe_pci_config(VFIOUserPCIDriverUserClient *client,
         }
     }
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe calling Close (may change PCI command bits)");
-    pciDevice->Close(client, 0);
+    pciDevice->Close(service, 0);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe Close returned; result=%#x", ret);
     __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
     return ret;

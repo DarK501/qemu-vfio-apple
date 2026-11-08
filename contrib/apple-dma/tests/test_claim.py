@@ -33,7 +33,7 @@ struct IOPCIDevice {
     bool fail_open = false, ignore_writes = false;
     uint16_t vendor = 0x1002, device = 0x731f, command = 0;
     int writes = 0;
-    int Open(VFIOUserPCIDriverUserClient *, int) {
+    int Open(IOService *, int) {
         opens++;
         if (block_open) {
             in_open = true;
@@ -41,7 +41,7 @@ struct IOPCIDevice {
         }
         return fail_open ? kIOReturnError : kIOReturnSuccess;
     }
-    void Close(VFIOUserPCIDriverUserClient *, int) {
+    void Close(IOService *, int) {
         closes++;
         if (block_close) {
             in_close = true;
