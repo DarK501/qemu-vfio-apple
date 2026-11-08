@@ -150,7 +150,9 @@ On an Intel Mac, the launcher defaults to x86_64; `--arch x86_64` selects
 the x86_64 image tag, `qemu-system-x86_64`, `q35`, and x86 UEFI files. The
 build/edit/seal helpers require `GUEST_ARCH` to match the host because these
 flows use HVF rather than cross-architecture emulation. The published QEMU
-dist must contain the host target binary before the app can embed it.
+dist must contain the host target binary and QEMU ROM data before the app can
+embed it. Re-run `scripts/make-dist.sh` after updating older distributions
+that lack x86 BIOS and VGA ROMs.
 
 The output directory is architecture-specific by default:
 `out/ubuntu-desktop-image` for arm64 and

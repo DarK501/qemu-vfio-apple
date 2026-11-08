@@ -166,6 +166,12 @@ if [ -d "$DIST/share/qemu" ]; then
 fi
 
 if [ "$QEMU_HOST_TARGET" = "x86_64" ]; then
+    for f in kvmvapic.bin vgabios-stdvga.bin vgabios-virtio.bin efi-virtio.rom; do
+        [ -f "$SHARE_DIR/$f" ] || {
+            echo "error: QEMU dist lacks x86_64 firmware $f" >&2
+            exit 1
+        }
+    done
     [ -f "$SHARE_DIR/edk2-x86_64-code.fd" ] || {
         echo "error: QEMU dist lacks x86_64 UEFI code firmware" >&2
         exit 1

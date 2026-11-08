@@ -255,7 +255,8 @@ done
 
 if [ -d "$BUILD_DIR/pc-bios" ]; then
     echo "Copying firmware/data files..."
-    SRC_BIOS="$(dirname "$BUILD_DIR")/pc-bios"
+    # This script runs from the source root, even for out-of-tree builds.
+    SRC_BIOS="pc-bios"
     # Firmware code blobs and vars templates for each supported target. We
     # ship both the code blob and vars template
     # template; qemu needs the template to seed a per-VM NVRAM file
@@ -271,17 +272,28 @@ if [ -d "$BUILD_DIR/pc-bios" ]; then
             echo "warning: missing $BUILD_DIR/pc-bios/$f" >&2
         fi
     done
-    # PCI option ROMs (efi-virtio.rom etc.) — these live in source pc-bios/
-    for f in "$SRC_BIOS"/efi-*.rom; do
-        cp "$f" "$DIST_DIR/share/qemu/" 2>/dev/null || true
+    # QEMU also loads BIOS, VGA, boot and PCI option ROMs from the data dir.
+    for f in "$SRC_BIOS"/*.bin "$SRC_BIOS"/*.rom; do
+        [ -f "$f" ] || continue
+        cp "$f" "$DIST_DIR/share/qemu/"
     done
-    # Shared data
+    # Shared data lives in the source tree, not necessarily the build tree.
     for d in keymaps descriptors; do
-        cp -R "$BUILD_DIR/pc-bios/$d" "$DIST_DIR/share/qemu/" 2>/dev/null || true
+        [ -d "$SRC_BIOS/$d" ] || {
+            echo "error: missing $SRC_BIOS/$d" >&2
+            exit 1
+        }
+        cp -R "$SRC_BIOS/$d" "$DIST_DIR/share/qemu/"
     done
 fi
 
 if [ -f "$BUILD_DIR/qemu-system-x86_64" ]; then
+    for f in kvmvapic.bin vgabios-stdvga.bin vgabios-virtio.bin efi-virtio.rom; do
+        [ -f "$DIST_DIR/share/qemu/$f" ] || {
+            echo "error: x86_64 QEMU target requires $f" >&2
+            exit 1
+        }
+    done
     [ -f "$DIST_DIR/share/qemu/edk2-x86_64-code.fd" ] || {
         echo "error: x86_64 QEMU target requires edk2-x86_64-code.fd" >&2
         exit 1
