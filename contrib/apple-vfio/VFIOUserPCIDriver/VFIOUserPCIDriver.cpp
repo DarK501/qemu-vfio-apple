@@ -13,6 +13,7 @@
 
 #include <DriverKit/OSMetaClass.h>
 #include <DriverKit/OSData.h>
+#include <DriverKit/OSNumber.h>
 #include <DriverKit/IOBufferMemoryDescriptor.h>
 #include <DriverKit/IOMemoryMap.h>
 #include <DriverKit/IODMACommand.h>
@@ -293,6 +294,36 @@ vfio_user_get_pci_device(IOService *service)
 }
 
 static kern_return_t
+vfio_user_registry_u32(IOPCIDevice *device, const char *name, uint32_t *value)
+{
+    OSContainer *property = nullptr;
+    kern_return_t ret = device->SearchProperty(name, "IOService", 0, &property);
+    if (ret != kIOReturnSuccess) {
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: registry property %{public}s failed: %#x",
+               name, ret);
+        return ret;
+    }
+
+    OSData *data = OSDynamicCast(OSData, property);
+    OSNumber *number = OSDynamicCast(OSNumber, property);
+    if (data != nullptr && data->getLength() == 4 &&
+        data->getBytesNoCopy() != nullptr) {
+        const uint8_t *bytes = static_cast<const uint8_t *>(data->getBytesNoCopy());
+        *value = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
+                 ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
+    } else if (number != nullptr && number->unsigned64BitValue() <= UINT32_MAX) {
+        *value = number->unsigned32BitValue();
+    } else {
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: registry property %{public}s has invalid type or length",
+               name);
+        OSSafeReleaseNULL(property);
+        return kIOReturnBadArgument;
+    }
+    OSSafeReleaseNULL(property);
+    return kIOReturnSuccess;
+}
+
+static kern_return_t
 vfio_user_read_identity(IOService *service, VFIOUserPCIDeviceIdentity *identity)
 {
     if (service == nullptr || identity == nullptr) {
@@ -318,10 +349,26 @@ vfio_user_read_identity(IOService *service, VFIOUserPCIDeviceIdentity *identity)
         return ret;
     }
 
-    pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetVendorID, &identity->vendorID);
-    pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetDeviceID, &identity->deviceID);
-    pciDevice->ConfigurationRead32(kIOPCIConfigurationOffsetRevisionID, &identity->classCode);
-    identity->classCode = (identity->classCode >> 8) & 0x00ffffffU;
+    uint32_t vendor, device, classCode;
+    ret = vfio_user_registry_u32(pciDevice, "vendor-id", &vendor);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+    ret = vfio_user_registry_u32(pciDevice, "device-id", &device);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+    ret = vfio_user_registry_u32(pciDevice, "class-code", &classCode);
+    if (ret != kIOReturnSuccess) {
+        return ret;
+    }
+    if (vendor >= 0xffff || device > 0xffff || classCode > 0xffffff) {
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: invalid PCI registry identity");
+        return kIOReturnBadArgument;
+    }
+    identity->vendorID = (uint16_t)vendor;
+    identity->deviceID = (uint16_t)device;
+    identity->classCode = classCode;
     return kIOReturnSuccess;
 }
 
@@ -398,10 +445,25 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
     }
 
     {
+        uint16_t vendor = 0xffff;
+        uint16_t device = 0xffff;
         uint16_t cmd = 0;
         uint16_t wanted;
 
+        pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetVendorID, &vendor);
+        pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetDeviceID, &device);
         pciDevice->ConfigurationRead16(0x04, &cmd);
+        if (vendor == 0xffff || device == 0xffff || cmd == 0xffff ||
+            vendor != identity->vendorID || device != identity->deviceID) {
+            os_log(OS_LOG_DEFAULT,
+                   "vfio-user-dext: claim configuration inaccessible or identity mismatch: registry=%04x:%04x config=%04x:%04x command=%04x",
+                   (unsigned int)identity->vendorID,
+                   (unsigned int)identity->deviceID,
+                   (unsigned int)vendor, (unsigned int)device, (unsigned int)cmd);
+            pciDevice->Close(client, 0);
+            __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
+            return kIOReturnNotReady;
+        }
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: PCI command register after Open: %#x", cmd);
         wanted = cmd | 0x06; /* Memory Space Enable + Bus Master Enable */
@@ -1235,26 +1297,14 @@ IMPL(VFIOUserPCIDriver, Start)
         return kIOReturnUnsupported;
     }
 
-    uint16_t command = 0xffff;
-    uint16_t status = 0xffff;
-    uint8_t headerType = 0xff;
-
-    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start reading PCI command/status/header");
-    pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetCommand, &command);
-    pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetStatus, &status);
-    pciDevice->ConfigurationRead8(kIOPCIConfigurationOffsetHeaderType, &headerType);
-
     os_log(OS_LOG_DEFAULT,
-           "vfio-user-dext: idle service for %02x:%02x.%u vendor=%04x device=%04x class=%06x command=%04x status=%04x header=%02x",
+           "vfio-user-dext: idle service registry identity %02x:%02x.%u vendor=%04x device=%04x class=%06x",
            (unsigned int)identity.bus,
            (unsigned int)identity.device,
            (unsigned int)identity.function,
            (unsigned int)identity.vendorID,
            (unsigned int)identity.deviceID,
-           (unsigned int)identity.classCode,
-           (unsigned int)command,
-           (unsigned int)status,
-           (unsigned int)headerType);
+           (unsigned int)identity.classCode);
 
     for (uint8_t bar = 0; bar < 6; ++bar) {
         uint8_t memoryIndex = 0;

@@ -63,7 +63,11 @@ during a panic; retain the panic report as well. These diagnostics do not
 identify which kernel code acquired a leaked lock, and neither an activated
 extension nor a registered service proves that PCI attachment succeeded.
 The PCI-matching extension can be started by macOS without a QEMU claim and
-its startup reads PCI configuration and BAR metadata. The existing claim
+its startup reads identity from PCI registry properties and queries BAR
+metadata, not live configuration space. A normal claim opens the PCI device
+and checks live vendor/device and command values against the registry before
+enabling bus mastering. Opening and closing a PCI device can themselves alter
+its state and do not establish device quiescence. The existing claim
 operation enables bus mastering: do not invoke it, run a guest using the
 physical device, or attempt DMA while the safety blocker remains.
 
