@@ -196,6 +196,9 @@ Useful knobs:
 - `QEMU_DATA_DIR`: override the QEMU firmware/data directory passed via `-L`
 - `EFI_CODE_SRC`: override path to the architecture-appropriate UEFI code file
 - `EFI_VARS_SRC`: override path to the architecture-appropriate UEFI vars file
+- `QEMU_DISPLAY`: display option for `edit-image.sh` (default
+  `cocoa,full-grab=on`). Try `cocoa,full-grab=on,show-cursor=on` if the mouse
+  pointer is invisible; this forces the host cursor and may show two pointers.
 - by default the builder now also checks `build/qemu-bundle/usr/local/share/qemu/`
   for those firmware blobs
 - `INSTALL_FEX`: `1` by default on arm64, `0` on x86_64

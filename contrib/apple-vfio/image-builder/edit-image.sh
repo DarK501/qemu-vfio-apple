@@ -68,6 +68,7 @@ IMAGE_NAME="${IMAGE_NAME:-$DEFAULT_IMAGE_NAME}"
 CPUS="${CPUS:-8}"
 MEMORY="${MEMORY:-12G}"
 EDIT_SSH_PORT="${EDIT_SSH_PORT:-2233}"
+QEMU_DISPLAY="${QEMU_DISPLAY:-cocoa,full-grab=on}"
 
 FINAL_IMAGE="$ARTIFACT_DIR/${IMAGE_NAME}.qcow2"
 EDIT_IMAGE="$WORK_DIR/${IMAGE_NAME}.edit.qcow2"
@@ -180,7 +181,7 @@ run_edit_vm() {
         -device usb-kbd,bus=xhci.0 \
         -device usb-tablet,bus=xhci.0 \
         -device virtio-gpu-pci \
-        -display cocoa,full-grab=on \
+        -display "$QEMU_DISPLAY" \
         2>&1 | tee "$EDIT_LOG"
 }
 
