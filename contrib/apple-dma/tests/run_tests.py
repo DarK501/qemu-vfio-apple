@@ -15,6 +15,7 @@ TESTS = (
     "test_bounce_client.py",
     "test_bar_cache.py",
     "test_connection.py",
+    "test_guest_protocol.py",
     "test_mapping.py",
     "test_registration.py",
     "test_dext_registration.py",

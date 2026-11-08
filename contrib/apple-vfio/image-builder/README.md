@@ -30,6 +30,13 @@ The guest module compiles against Ubuntu x86_64 6.8, 6.17, and
 DMA. Older kernels expose per-device DMA operations under `CONFIG_DMA_OPS`,
 while newer kernels use `CONFIG_ARCH_HAS_DMA_OPS`.
 
+The guest wrapper temporarily replaces a managed device's DMA operations while
+calling the original DMA API. Concurrent DMA calls may observe those original
+operations and bypass the companion, potentially using guest addresses rather
+than host device addresses. This is an unresolved correctness and safety
+blocker: do not use this path for physical device DMA until the wrapper is
+redesigned and validated for concurrent calls.
+
 The DMA companion must share the matching `vfio-apple-pci` connection; the
 normal `dma-companion=on` configuration creates it automatically. Standalone
 companions must be realized after their matching VFIO device, and a second
@@ -60,7 +67,7 @@ Interrupt-source cancellation is asynchronous. The client stop retains its
 state and returns `kIOReturnStillOpen` until cancellation completes. A later
 Stop invocation is required to finish cleanup; automatic retry behavior is not
 verified, and DriverKit may still force teardown.
-The connection, claim, BAR isolation, mapping, response and teardown mock
+The connection, claim, BAR isolation, guest protocol, mapping, response and teardown mock
 checks run from the repository root with
 `python3 contrib/apple-dma/tests/run_tests.py`. They require C and C++
 compilers and do not replace macOS builds or hardware testing.
