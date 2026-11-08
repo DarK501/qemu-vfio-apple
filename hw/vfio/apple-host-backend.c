@@ -14,6 +14,7 @@ static const AppleDextClientOps apple_dext_client_ops = {
     .connect_with_root = apple_dext_client_connect_with_root,
     .disconnect = apple_dext_client_disconnect,
     .claim = apple_dext_client_claim,
+    .release_claim = apple_dext_client_release_claim,
     .allocate_dma_buffer = apple_dext_client_allocate_dma_buffer,
     .free_dma_buffer = apple_dext_client_free_dma_buffer,
     .probe_dma = apple_dext_client_probe_dma,

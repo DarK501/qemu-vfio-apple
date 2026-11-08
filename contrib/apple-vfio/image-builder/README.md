@@ -101,6 +101,13 @@ connection and reports the failure. The dext retains its Start-time PCI Open
 after a successful app release so it continues to own the nub; a subsequent
 VFIO user client can acquire the released claim. A successful claim does not
 validate the guest DMA path or prevent forced DriverKit teardown.
+QEMU requests the same explicit release after the VFIO owner and DMA companion
+have dropped their shared connection references. Interrupt cancellation is
+asynchronous, so QEMU retries a pending release briefly. On failure it reports
+the error and retains the connection rather than knowingly closing it; this
+does not guarantee safety if QEMU exits or DriverKit forces teardown. Do not
+run physical-device guest DMA until the guest DMA interception race and the
+complete mapping and shutdown lifecycle have been resolved and validated.
 The app's `vfio-gpu-claim:` messages and the dext's `vfio-user-dext:` messages
 are recorded by the macOS unified log with timestamps. To capture them:
 

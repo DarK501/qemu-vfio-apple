@@ -870,6 +870,37 @@ VFIODeviceIOOps apple_vfio_device_io_ops = {
     .region_unmap = apple_vfio_region_unmap,
 };
 
+bool apple_vfio_dext_close_connection(io_connect_t conn, bool claimed)
+{
+    kern_return_t kr;
+
+    if (claimed) {
+        unsigned int attempt;
+
+        for (attempt = 0; ; attempt++) {
+            kr = apple_host_backend()->client->release_claim(conn);
+            if (kr != kIOReturnStillOpen || attempt == 99) {
+                break;
+            }
+            g_usleep(10000);
+        }
+        if (kr != KERN_SUCCESS) {
+            error_report("vfio-apple: claim release failed (kr=0x%x); "
+                         "retaining connection until process exit; "
+                         "device shutdown is not guaranteed safe", kr);
+            return false;
+        }
+    }
+
+    kr = apple_host_backend()->client->disconnect(conn);
+    if (kr != KERN_SUCCESS) {
+        error_report("vfio-apple: user-client close failed (kr=0x%x); "
+                     "connection state is uncertain", kr);
+        return false;
+    }
+    return true;
+}
+
 bool apple_vfio_dext_publish(uint8_t bus, uint8_t device, uint8_t function,
                              const char *host_root, uint32_t managed_bdf,
                              io_connect_t conn)
@@ -966,8 +997,9 @@ static void apple_vfio_dext_release_ref(uint8_t bus, uint8_t device,
         shared->owner_attached = false;
     }
     if (--shared->refs == 0) {
-        apple_host_backend()->client->disconnect(conn);
-        g_hash_table_remove(apple_vfio_shared_dexts, key);
+        if (apple_vfio_dext_close_connection(conn, true)) {
+            g_hash_table_remove(apple_vfio_shared_dexts, key);
+        }
     }
     g_free(key);
 }

@@ -37,6 +37,7 @@ enum {
     kSelectorWaitInterrupt      = 15,
     kSelectorSetIRQMask         = 16,
     kSelectorResetDevice        = 17,
+    kSelectorReleaseClaim       = 20,
 };
 
 /*
@@ -337,12 +338,13 @@ apple_dext_client_connect(uint8_t bus, uint8_t device, uint8_t function)
     return apple_dext_client_connect_with_root(bus, device, function, NULL, NULL);
 }
 
-void
+kern_return_t
 apple_dext_client_disconnect(io_connect_t connection)
 {
-    if (connection != IO_OBJECT_NULL) {
-        IOServiceClose(connection);
+    if (connection == IO_OBJECT_NULL) {
+        return kIOReturnBadArgument;
     }
+    return IOServiceClose(connection);
 }
 
 kern_return_t
@@ -356,6 +358,17 @@ apple_dext_client_claim(io_connect_t connection)
                                kSelectorClaim,
                                NULL, 0, NULL, 0,
                                NULL, NULL, NULL, NULL);
+}
+
+kern_return_t
+apple_dext_client_release_claim(io_connect_t connection)
+{
+    if (connection == IO_OBJECT_NULL) {
+        return kIOReturnBadArgument;
+    }
+
+    return IOConnectCallMethod(connection, kSelectorReleaseClaim,
+                               NULL, 0, NULL, 0, NULL, NULL, NULL, NULL);
 }
 
 kern_return_t

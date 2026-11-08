@@ -54,15 +54,21 @@ io_connect_t apple_dext_client_connect(uint8_t bus, uint8_t device,
                                     uint8_t function);
 
 /*
- * Close a previously opened connection.
+ * Close a previously opened connection, returning the IOKit result.
  */
-void apple_dext_client_disconnect(io_connect_t connection);
+kern_return_t apple_dext_client_disconnect(io_connect_t connection);
 
 /*
  * Claim the PCI device through the dext (opens the IOPCIDevice provider).
  * Must be called before registering DMA regions.
  */
 kern_return_t apple_dext_client_claim(io_connect_t connection);
+
+/*
+ * Request a synchronous claim release. Success means the dext verified that
+ * bus mastering is disabled; it does not prove that device DMA has drained.
+ */
+kern_return_t apple_dext_client_release_claim(io_connect_t connection);
 
 typedef enum AppleDMARegistrationState {
     APPLE_DMA_REGISTRATION_NONE,

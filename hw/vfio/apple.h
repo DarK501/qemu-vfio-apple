@@ -105,6 +105,7 @@ bool apple_vfio_get_bar_info(VFIOApplePCIDevice *adev, uint8_t bar,
 bool apple_vfio_dext_publish(uint8_t bus, uint8_t device, uint8_t function,
                              const char *host_root, uint32_t managed_bdf,
                              io_connect_t conn);
+bool apple_vfio_dext_close_connection(io_connect_t conn, bool claimed);
 io_connect_t apple_vfio_dext_acquire_dma(uint8_t bus, uint8_t device,
                                          uint8_t function,
                                          const char *host_root,

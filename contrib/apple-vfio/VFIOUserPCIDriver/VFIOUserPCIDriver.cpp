@@ -2022,6 +2022,15 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     }
 
     case kVFIOUserPCIDriverUserClientMethodReleaseClaim:
+        if (ivars != nullptr && ivars->claimed) {
+            ret = vfio_user_release_all_interrupts(this);
+            if (ret != kIOReturnSuccess) {
+                os_log(OS_LOG_DEFAULT,
+                       "vfio-user-dext: claim release waiting for interrupt cleanup: %#x",
+                       ret);
+                return ret;
+            }
+        }
         return vfio_user_release_claim(this);
 
     case kVFIOUserPCIDriverUserClientMethodTerminate:

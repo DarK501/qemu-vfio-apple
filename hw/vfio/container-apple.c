@@ -81,6 +81,7 @@ static AppleVFIOContainer *apple_vfio_container_connect(AddressSpace *as,
     VFIOIOMMUClass *vioc;
     int ret;
     char *connect_err = NULL;
+    bool claimed = false;
 
     space = vfio_address_space_get(as);
     container = VFIO_IOMMU_APPLE(object_new(TYPE_VFIO_IOMMU_APPLE));
@@ -127,6 +128,7 @@ static AppleVFIOContainer *apple_vfio_container_connect(AddressSpace *as,
                    container->host_function);
         goto fail_release_conn;
     }
+    claimed = true;
 
     if (!apple_vfio_dext_publish(container->host_bus, container->host_device,
                                  container->host_function,
@@ -176,7 +178,7 @@ fail_unref:
     return NULL;
 
 fail_release_conn:
-    apple_host_backend()->client->disconnect(container->dext_conn);
+    apple_vfio_dext_close_connection(container->dext_conn, claimed);
     container->dext_conn = IO_OBJECT_NULL;
     goto fail_discards;
 }

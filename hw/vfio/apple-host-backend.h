@@ -13,6 +13,7 @@ typedef struct AppleDextClientOps {
     __typeof__(&apple_dext_client_connect_with_root) connect_with_root;
     __typeof__(&apple_dext_client_disconnect) disconnect;
     __typeof__(&apple_dext_client_claim) claim;
+    __typeof__(&apple_dext_client_release_claim) release_claim;
     __typeof__(&apple_dext_client_allocate_dma_buffer) allocate_dma_buffer;
     __typeof__(&apple_dext_client_free_dma_buffer) free_dma_buffer;
     __typeof__(&apple_dext_client_probe_dma) probe_dma;
