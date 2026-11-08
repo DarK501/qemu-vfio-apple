@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Bundle qemu-system-aarch64 and related QEMU tools with all their non-system
+# Bundle available host-native QEMU targets and related tools with non-system
 # dylib dependencies into a self-contained dist/ directory. Lives under the
 # apple-vfio contrib because the resulting layout (single dist/ tree with
 # @executable_path-rewritten dylibs in lib/) is shaped specifically for the
@@ -27,15 +27,21 @@ set -euo pipefail
 
 BUILD_DIR="${1:-build}"
 DIST_DIR="${2:-dist}"
-MAIN_BINARY="$BUILD_DIR/qemu-system-aarch64"
 REQUIRED_BINARIES="qemu-img"
+MAIN_BINARIES=()
+for target in aarch64 x86_64; do
+    binary="$BUILD_DIR/qemu-system-$target"
+    if [ -f "$binary" ]; then
+        MAIN_BINARIES+=("$binary")
+    fi
+done
 ENTITLEMENTS="accel/hvf/entitlements.plist"
 
 # Codesigning identity: "-" for ad-hoc, or "Developer ID Application: ..." for distribution
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
-if [ ! -f "$MAIN_BINARY" ]; then
-    echo "error: $MAIN_BINARY not found" >&2
+if [ "${#MAIN_BINARIES[@]}" -eq 0 ]; then
+    echo "error: no qemu-system-aarch64 or qemu-system-x86_64 binary found in $BUILD_DIR" >&2
     exit 1
 fi
 
@@ -236,8 +242,10 @@ get_deps() {
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR/lib" "$DIST_DIR/share/qemu"
 
-echo "Copying binary..."
-cp "$MAIN_BINARY" "$DIST_DIR/qemu-system-aarch64"
+for binary in "${MAIN_BINARIES[@]}"; do
+    echo "Copying binary: $(basename "$binary")"
+    cp "$binary" "$DIST_DIR/$(basename "$binary")"
+done
 
 for tool in $REQUIRED_BINARIES; do
     src="$BUILD_DIR/$tool"
@@ -248,13 +256,15 @@ done
 if [ -d "$BUILD_DIR/pc-bios" ]; then
     echo "Copying firmware/data files..."
     SRC_BIOS="$(dirname "$BUILD_DIR")/pc-bios"
-    # aarch64 firmware. We ship both the code blob and the vars
+    # Firmware code blobs and vars templates for each supported target. We
+    # ship both the code blob and vars template
     # template; qemu needs the template to seed a per-VM NVRAM file
     # on first boot, and the launcher (qemu-vfio-apple) explodes with
     # "missing in bundle" if it isn't there. edk2-arm-vars.fd is the
     # canonical generic arm vars file — it's byte-compatible with
     # aarch64 because the vars volume is just a FAT-ish NVRAM blob.
-    for f in edk2-aarch64-code.fd edk2-arm-vars.fd; do
+    for f in edk2-aarch64-code.fd edk2-arm-vars.fd \
+             edk2-x86_64-code.fd edk2-i386-vars.fd edk2-x86_64-vars.fd; do
         if [ -f "$BUILD_DIR/pc-bios/$f" ]; then
             cp "$BUILD_DIR/pc-bios/$f" "$DIST_DIR/share/qemu/"
         else
@@ -271,11 +281,25 @@ if [ -d "$BUILD_DIR/pc-bios" ]; then
     done
 fi
 
+if [ -f "$BUILD_DIR/qemu-system-x86_64" ]; then
+    [ -f "$DIST_DIR/share/qemu/edk2-x86_64-code.fd" ] || {
+        echo "error: x86_64 QEMU target requires edk2-x86_64-code.fd" >&2
+        exit 1
+    }
+    if [ ! -f "$DIST_DIR/share/qemu/edk2-i386-vars.fd" ] &&
+       [ ! -f "$DIST_DIR/share/qemu/edk2-x86_64-vars.fd" ]; then
+        echo "error: x86_64 QEMU target requires edk2-i386-vars.fd or edk2-x86_64-vars.fd" >&2
+        exit 1
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Recursively collect all non-system dylibs (BFS)
 # ---------------------------------------------------------------------------
 
-get_rpaths "$MAIN_BINARY" > "$RPATHS_FILE"
+for binary in "${MAIN_BINARIES[@]}"; do
+    get_rpaths "$binary" >> "$RPATHS_FILE"
+done
 
 echo "Resolving dependencies..."
 
@@ -294,7 +318,9 @@ seed_binary_deps() {
     done
 }
 
-seed_binary_deps "$MAIN_BINARY" > "$QUEUE_FILE"
+for binary in "${MAIN_BINARIES[@]}"; do
+    seed_binary_deps "$binary" >> "$QUEUE_FILE"
+done
 for tool in $REQUIRED_BINARIES; do
     src="$BUILD_DIR/$tool"
     seed_binary_deps "$src" >> "$QUEUE_FILE"
@@ -393,7 +419,9 @@ rewrite_file() {
 }
 
 # Rewrite bundled executables (no orig_dir needed, they use @rpath not @loader_path)
-rewrite_file "$DIST_DIR/qemu-system-aarch64" "@executable_path/lib"
+for binary in "${MAIN_BINARIES[@]}"; do
+    rewrite_file "$DIST_DIR/$(basename "$binary")" "@executable_path/lib"
+done
 for tool in $REQUIRED_BINARIES; do
     rewrite_file "$DIST_DIR/$tool" "@executable_path/lib"
 done
@@ -406,7 +434,7 @@ for dylib in "$DIST_DIR"/lib/*.dylib; do
 done
 
 # ---------------------------------------------------------------------------
-# Codesign (required on Apple Silicon)
+# Codesign (required for HVF on macOS)
 # ---------------------------------------------------------------------------
 
 echo "Codesigning with identity: $CODESIGN_IDENTITY"
@@ -430,12 +458,15 @@ for tool in $REQUIRED_BINARIES; do
     codesign "${SIGN_OPTS[@]}" "$DIST_DIR/$tool"
 done
 
-# Sign the main binary last, with entitlements
-if [ -f "$ENTITLEMENTS" ]; then
-    codesign "${SIGN_OPTS[@]}" --entitlements "$ENTITLEMENTS" "$DIST_DIR/qemu-system-aarch64"
-else
-    codesign "${SIGN_OPTS[@]}" "$DIST_DIR/qemu-system-aarch64"
-fi
+# Sign QEMU targets last, with hypervisor entitlements.
+for binary in "${MAIN_BINARIES[@]}"; do
+    if [ -f "$ENTITLEMENTS" ]; then
+        codesign "${SIGN_OPTS[@]}" --entitlements "$ENTITLEMENTS" \
+            "$DIST_DIR/$(basename "$binary")"
+    else
+        codesign "${SIGN_OPTS[@]}" "$DIST_DIR/$(basename "$binary")"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Verify
@@ -466,7 +497,9 @@ verify_executable_refs() {
     done < "$WORK/verify_refs_$name"
 }
 
-verify_executable_refs "$DIST_DIR/qemu-system-aarch64"
+for binary in "${MAIN_BINARIES[@]}"; do
+    verify_executable_refs "$DIST_DIR/$(basename "$binary")"
+done
 for tool in $REQUIRED_BINARIES; do
     verify_executable_refs "$DIST_DIR/$tool"
 done

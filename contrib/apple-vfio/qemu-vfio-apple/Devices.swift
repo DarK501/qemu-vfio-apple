@@ -120,10 +120,10 @@ func cmdListDevices() -> Int32 {
     if anyOurs {
         print("[*] = bound to vfio-user; pass through with:")
         if anyCollision {
-            print("        qemu-system-aarch64 ... \\")
+            print("        qemu-system-<host-arch> ... \\")
             print("            -device vfio-apple-pci,host=<BDF>,host-root=<ROOT>")
         } else {
-            print("        qemu-system-aarch64 ... -device vfio-apple-pci,host=<BDF>")
+            print("        qemu-system-<host-arch> ... -device vfio-apple-pci,host=<BDF>")
         }
     }
     if anyCollision {

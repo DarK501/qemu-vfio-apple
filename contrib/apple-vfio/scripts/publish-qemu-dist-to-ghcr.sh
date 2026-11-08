@@ -63,6 +63,11 @@ default_tag_from_git() {
 
 TAG="${1:-}"
 TARBALL="${2:-$HERE/../../../dist.tar.gz}"
+case "$(uname -m)" in
+    arm64) QEMU_HOST_ARCH="arm64" ;;
+    x86_64) QEMU_HOST_ARCH="x86_64" ;;
+    *) echo "error: unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
+esac
 
 if [ -z "$TAG" ]; then
     if ! TAG="$(default_tag_from_git)" || [ -z "$TAG" ]; then
@@ -70,6 +75,7 @@ if [ -z "$TAG" ]; then
         echo "  (could not derive default tag from QEMU_TREE=$QEMU_TREE — pass one explicitly)" >&2
         exit 1
     fi
+    TAG="${TAG}-${QEMU_HOST_ARCH}"
 fi
 
 GH_USER="${GH_USER:-scottjg}"
@@ -144,7 +150,7 @@ echo "$GH_TOKEN" | oras login ghcr.io -u "$GH_USER" --password-stdin
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-LAYER_NAME="qemu-dist-${TAG}-arm64.tar.gz"
+LAYER_NAME="qemu-dist-${TAG}-${QEMU_HOST_ARCH}.tar.gz"
 cp "$TARBALL" "$work/$LAYER_NAME"
 
 pushd "$work" >/dev/null
@@ -159,7 +165,7 @@ push_for_tag() {
         --artifact-type "$artifact_type" \
         --annotation "org.opencontainers.image.source=$SOURCE_REPO_URL" \
         --annotation "org.opencontainers.image.title=qemu-dist-$TAG" \
-        --annotation "org.opencontainers.image.description=apple-vfio QEMU dist tarball (qemu-system-aarch64 + qemu-img + dylibs + share)" \
+        --annotation "org.opencontainers.image.description=apple-vfio QEMU dist tarball ($QEMU_HOST_ARCH host binaries + QEMU targets + firmware)" \
         --annotation "org.opencontainers.image.licenses=GPL-2.0" \
         "$LAYER_NAME:$layer_media"
 }

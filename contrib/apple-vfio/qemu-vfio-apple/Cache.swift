@@ -123,8 +123,8 @@ func overlayURL(for vmName: String) -> URL {
 
 /// Path to the per-VM mutable EFI vars file. Created on first boot by
 /// copying the bundled template.
-func efiVarsURL(for vmName: String) -> URL {
-    vmStateDirURL(for: vmName).appendingPathComponent("edk2-aarch64-vars.fd")
+func efiVarsURL(for vmName: String, architecture: GuestArchitecture) -> URL {
+    vmStateDirURL(for: vmName).appendingPathComponent(architecture.efiStateName)
 }
 
 /// Resolve the overlay URL to use, honoring an explicit `--overlay`

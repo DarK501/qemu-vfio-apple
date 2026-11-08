@@ -98,14 +98,24 @@ bool apple_vfio_get_bar_info(VFIOApplePCIDevice *adev, uint8_t bar,
  * vfio-apple-pci container and shared with the matching apple-dma-pci
  * companion. The cache is keyed by (bus, device, function, host_root)
  * so devices that share a BDF under different host roots stay distinct.
- * `host_root` may be NULL on both publish and lookup; NULL is treated
- * as a distinct key from any non-NULL string.
+ * A NULL host_root and an empty string identify the same unspecified root.
+ * Only one companion may acquire a published connection at a time, and its
+ * guest BDF must match the published VFIO device.
  */
 bool apple_vfio_dext_publish(uint8_t bus, uint8_t device, uint8_t function,
-                             const char *host_root, io_connect_t conn);
-io_connect_t apple_vfio_dext_lookup(uint8_t bus, uint8_t device,
-                                    uint8_t function,
-                                    const char *host_root);
+                             const char *host_root, uint32_t managed_bdf,
+                             io_connect_t conn);
+io_connect_t apple_vfio_dext_acquire_dma(uint8_t bus, uint8_t device,
+                                         uint8_t function,
+                                         const char *host_root,
+                                         uint32_t managed_bdf);
+bool apple_vfio_dext_dma_owner_attached(uint8_t bus, uint8_t device,
+                                        uint8_t function,
+                                        const char *host_root,
+                                        io_connect_t conn);
+void apple_vfio_dext_release_dma(uint8_t bus, uint8_t device,
+                                 uint8_t function, const char *host_root,
+                                 io_connect_t conn);
 void apple_vfio_dext_release(uint8_t bus, uint8_t device, uint8_t function,
                              const char *host_root, io_connect_t conn);
 

@@ -3,7 +3,7 @@
 // Three rows:
 //   1. Location:  is the .app in /Applications?
 //   2. System extension: is the dext activated?
-//   3. CLI tools: is qemu-system-aarch64 installed in ~/.local/bin?
+//   3. CLI tools: is the host-native QEMU target installed in ~/.local/bin?
 //      (only shown once QEMU is actually bundled into the .app)
 
 import SwiftUI

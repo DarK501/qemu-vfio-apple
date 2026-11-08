@@ -11,8 +11,8 @@
  *  4. Unregister DMA regions when QEMU removes them.
  *
  * Integration with libvfio-user:
- *   vfu_dma_register_cb_t  ->  apple_dext_register_dma()
- *   vfu_dma_unregister_cb_t -> apple_dext_unregister_dma()
+ *   vfu_dma_register_cb_t  ->  apple_dext_client_register_dma()
+ *   vfu_dma_unregister_cb_t -> apple_dext_client_unregister_dma()
  *
  * Copyright (c) 2026 Scott J. Goldman
  */
@@ -22,6 +22,7 @@
 
 #include <IOKit/IOKitLib.h>
 #include <stdint.h>
+#include "contrib/apple-dma/apple-dma-protocol.h"
 
 /*
  * Find the VFIOUserPCIDriver dext instance matching the given PCI BDF
@@ -40,47 +41,57 @@
  * match; left unset on plain IOKit errors so callers can synthesise their
  * own message).
  */
-io_connect_t apple_dext_connect_with_root(uint8_t bus, uint8_t device,
+io_connect_t apple_dext_client_connect_with_root(uint8_t bus, uint8_t device,
                                           uint8_t function,
                                           const char *host_root,
                                           char **errp);
 
 /*
- * Convenience wrapper: same as apple_dext_connect_with_root(..., NULL, NULL).
+ * Convenience wrapper: same as apple_dext_client_connect_with_root(..., NULL, NULL).
  * Use this for paths that have already validated uniqueness or don't care.
  */
-io_connect_t apple_dext_connect(uint8_t bus, uint8_t device,
+io_connect_t apple_dext_client_connect(uint8_t bus, uint8_t device,
                                     uint8_t function);
 
 /*
  * Close a previously opened connection.
  */
-void apple_dext_disconnect(io_connect_t connection);
+void apple_dext_client_disconnect(io_connect_t connection);
 
 /*
  * Claim the PCI device through the dext (opens the IOPCIDevice provider).
  * Must be called before registering DMA regions.
  */
-kern_return_t apple_dext_claim(io_connect_t connection);
+kern_return_t apple_dext_client_claim(io_connect_t connection);
+
+typedef enum AppleDMARegistrationState {
+    APPLE_DMA_REGISTRATION_NONE,
+    APPLE_DMA_REGISTRATION_OWNED,
+    APPLE_DMA_REGISTRATION_UNKNOWN,
+} AppleDMARegistrationState;
 
 /*
  * Register a region of this process's address space for DMA.
  *
- * @iova:         guest IOVA (device-visible DMA address)
+ * @iova:         opaque mapping token used to match unregister calls; it is
+ *                not a device-visible DMA address
  * @client_va:    virtual address of the memory in this process
  * @size:         region size in bytes
- * @out_bus_addr: receives first DMA bus address segment (may be NULL)
- * @out_bus_len:  receives first DMA bus address segment length (may be NULL)
+ * @out_result:   receives the token and complete device-visible DMA segments
+ * @out_state:    ownership outcome, including on failure
  *
  * The memory at client_va must remain valid and mapped until the region
- * is unregistered.
+ * is unregistered. OWNED means this request created a mapping, even if it
+ * failed. UNKNOWN means the reply did not establish ownership; do not
+ * unregister the token, which might belong to another request, or release
+ * the backing until ownership is resolved.
  */
-kern_return_t apple_dext_register_dma(io_connect_t connection,
+kern_return_t apple_dext_client_register_dma(io_connect_t connection,
                                           uint64_t iova,
                                           uint64_t client_va,
                                           uint64_t size,
-                                          uint64_t *out_bus_addr,
-                                          uint64_t *out_bus_len);
+                                          AppleDMAMapResult *out_result,
+                                          AppleDMARegistrationState *out_state);
 
 /*
  * Allocate a DMA buffer in the dext and map it into this process.
@@ -96,7 +107,7 @@ kern_return_t apple_dext_register_dma(io_connect_t connection,
  * @out_addr:     receives the mapped virtual address in this process
  * @out_size:     receives the mapped size
  */
-kern_return_t apple_dext_allocate_dma_buffer(io_connect_t connection,
+kern_return_t apple_dext_client_allocate_dma_buffer(io_connect_t connection,
                                              uint64_t size,
                                              uint64_t alignment,
                                              uint64_t *out_bus_addr,
@@ -105,18 +116,18 @@ kern_return_t apple_dext_allocate_dma_buffer(io_connect_t connection,
                                              mach_vm_size_t *out_size);
 
 /*
- * Free a DMA buffer previously allocated with apple_dext_allocate_dma_buffer.
+ * Free a DMA buffer previously allocated with apple_dext_client_allocate_dma_buffer.
  * Unmaps the buffer from this process and releases it in the dext.
  *
- * @addr: the mapped address returned by apple_dext_allocate_dma_buffer
+ * @addr: the mapped address returned by apple_dext_client_allocate_dma_buffer
  */
-kern_return_t apple_dext_free_dma_buffer(io_connect_t connection,
+kern_return_t apple_dext_client_free_dma_buffer(io_connect_t connection,
                                          mach_vm_address_t addr);
 
 /*
- * Unregister a previously registered DMA region identified by its IOVA.
+ * Unregister a previously registered DMA region identified by its token.
  */
-kern_return_t apple_dext_unregister_dma(io_connect_t connection,
+kern_return_t apple_dext_client_unregister_dma(io_connect_t connection,
                                             uint64_t iova);
 
 /*
@@ -128,7 +139,7 @@ kern_return_t apple_dext_unregister_dma(io_connect_t connection,
  * @offset:   byte offset within the region to read from
  * @out_word: receives the 8-byte value read from the descriptor
  */
-kern_return_t apple_dext_probe_dma(io_connect_t connection,
+kern_return_t apple_dext_client_probe_dma(io_connect_t connection,
                                        uint64_t iova,
                                        uint64_t offset,
                                        uint64_t *out_word);
@@ -140,7 +151,7 @@ kern_return_t apple_dext_probe_dma(io_connect_t connection,
  * @width:  access width in bytes (1, 2, or 4)
  * @out_value: receives the value read
  */
-kern_return_t apple_dext_config_read(io_connect_t connection,
+kern_return_t apple_dext_client_config_read(io_connect_t connection,
                                          uint64_t offset,
                                          uint64_t width,
                                          uint64_t *out_value);
@@ -152,7 +163,7 @@ kern_return_t apple_dext_config_read(io_connect_t connection,
  * @width:  access width in bytes (1, 2, or 4)
  * @value:  value to write
  */
-kern_return_t apple_dext_config_write(io_connect_t connection,
+kern_return_t apple_dext_client_config_write(io_connect_t connection,
                                           uint64_t offset,
                                           uint64_t width,
                                           uint64_t value);
@@ -166,7 +177,7 @@ kern_return_t apple_dext_config_write(io_connect_t connection,
  * @buf:    destination buffer
  * @len:    number of bytes to read
  */
-kern_return_t apple_dext_config_read_block(io_connect_t connection,
+kern_return_t apple_dext_client_config_read_block(io_connect_t connection,
                                                uint64_t offset,
                                                void *buf,
                                                size_t len);
@@ -179,7 +190,7 @@ kern_return_t apple_dext_config_read_block(io_connect_t connection,
  * @out_size:     receives the BAR size in bytes
  * @out_type:     receives the BAR type (mem32, mem64, io, etc.)
  */
-kern_return_t apple_dext_get_bar_info(io_connect_t connection,
+kern_return_t apple_dext_client_get_bar_info(io_connect_t connection,
                                           uint8_t bar,
                                           uint8_t *out_mem_idx,
                                           uint64_t *out_size,
@@ -197,28 +208,28 @@ kern_return_t apple_dext_get_bar_info(io_connect_t connection,
  * @out_size: receives the mapped size
  * @out_type: receives the BAR type (may be NULL)
  */
-kern_return_t apple_dext_map_bar(io_connect_t connection,
+kern_return_t apple_dext_client_map_bar(io_connect_t connection,
                                      uint8_t bar,
                                      mach_vm_address_t *out_addr,
                                      mach_vm_size_t *out_size,
                                      uint8_t *out_type);
 
 /*
- * Unmap a BAR previously mapped with apple_dext_map_bar().
+ * Unmap a BAR previously mapped with apple_dext_client_map_bar().
  */
-kern_return_t apple_dext_unmap_bar(io_connect_t connection,
+kern_return_t apple_dext_client_unmap_bar(io_connect_t connection,
                                        uint8_t bar,
                                        mach_vm_address_t addr);
 
 /*
  * Read from a PCI BAR (MMIO).
  *
- * @mem_idx: memory index from apple_dext_get_bar_info
+ * @mem_idx: memory index from apple_dext_client_get_bar_info
  * @offset:  byte offset within the BAR
  * @width:   access width in bytes (1, 2, 4, or 8)
  * @out_value: receives the value read
  */
-kern_return_t apple_dext_mmio_read(io_connect_t connection,
+kern_return_t apple_dext_client_mmio_read(io_connect_t connection,
                                        uint8_t mem_idx,
                                        uint64_t offset,
                                        uint64_t width,
@@ -227,12 +238,12 @@ kern_return_t apple_dext_mmio_read(io_connect_t connection,
 /*
  * Write to a PCI BAR (MMIO).
  *
- * @mem_idx: memory index from apple_dext_get_bar_info
+ * @mem_idx: memory index from apple_dext_client_get_bar_info
  * @offset:  byte offset within the BAR
  * @width:   access width in bytes (1, 2, 4, or 8)
  * @value:   value to write
  */
-kern_return_t apple_dext_mmio_write(io_connect_t connection,
+kern_return_t apple_dext_client_mmio_write(io_connect_t connection,
                                         uint8_t mem_idx,
                                         uint64_t offset,
                                         uint64_t width,
@@ -242,25 +253,25 @@ kern_return_t apple_dext_mmio_write(io_connect_t connection,
  * Set up interrupt forwarding for the PCI device.
  * Creates IOInterruptDispatchSource handlers for all available
  * MSI/MSI-X vectors in the dext. Interrupts are queued in a ring
- * buffer and retrieved via apple_dext_check_interrupt().
+ * buffer and retrieved via apple_dext_client_read_pending_irqs().
  *
  * @out_num_vectors: receives the number of interrupt vectors registered
  */
-kern_return_t apple_dext_setup_interrupts(io_connect_t connection,
+kern_return_t apple_dext_client_setup_interrupts(io_connect_t connection,
                                               uint32_t *out_num_vectors);
 
 /*
  * Reset the PCI device via the dext. The dext tries FLR first and falls
  * back to a secondary bus (hot) reset if FLR isn't supported.
  */
-kern_return_t apple_dext_reset_device(io_connect_t connection);
+kern_return_t apple_dext_client_reset_device(io_connect_t connection);
 
 /*
  * Set the IRQ enable mask in the dext.  Only vectors with their
  * corresponding bit set will be recorded as pending when the
  * hardware fires.  mask[] is 4 x uint64_t covering 256 vectors.
  */
-kern_return_t apple_dext_set_irq_mask(io_connect_t connection,
+kern_return_t apple_dext_client_set_irq_mask(io_connect_t connection,
                                       const uint64_t mask[4]);
 
 /*
@@ -269,7 +280,7 @@ kern_return_t apple_dext_set_irq_mask(io_connect_t connection,
  * 4 uint64_t words.  Each bit that was set is atomically cleared
  * in the dext.
  */
-kern_return_t apple_dext_read_pending_irqs(io_connect_t connection,
+kern_return_t apple_dext_client_read_pending_irqs(io_connect_t connection,
                                            uint64_t pending[4]);
 
 /*
@@ -281,12 +292,12 @@ typedef struct AppleDextInterruptNotify AppleDextInterruptNotify;
  * Create async interrupt notification.  handler_fn is called on a GCD
  * dispatch queue whenever the dext signals that one or more interrupt
  * bits have been set.  The handler should wake the QEMU main loop,
- * which then calls apple_dext_read_pending_irqs() to drain the bits.
+ * which then calls apple_dext_client_read_pending_irqs() to drain the bits.
  *
  * The notification is armed immediately upon creation.
  */
 AppleDextInterruptNotify *
-apple_dext_interrupt_notify_create(io_connect_t connection,
+apple_dext_client_interrupt_notify_create(io_connect_t connection,
                                    void (*handler_fn)(void *opaque),
                                    void *opaque);
 
@@ -295,11 +306,11 @@ apple_dext_interrupt_notify_create(io_connect_t connection,
  * Must be called after each wakeup to receive subsequent notifications.
  */
 kern_return_t
-apple_dext_interrupt_notify_rearm(AppleDextInterruptNotify *notify);
+apple_dext_client_interrupt_notify_rearm(AppleDextInterruptNotify *notify);
 
 /*
  * Tear down and free async interrupt notification state.
  */
-void apple_dext_interrupt_notify_destroy(AppleDextInterruptNotify *notify);
+void apple_dext_client_interrupt_notify_destroy(AppleDextInterruptNotify *notify);
 
 #endif /* HW_VFIO_APPLE_DEXT_CLIENT_H */

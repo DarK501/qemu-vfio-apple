@@ -6,9 +6,12 @@
 
 KERNELDIR ?= /lib/modules/$(shell uname -r)/build
 
+ccflags-y += -I$(src)/.. -I$(src)
 obj-m += apple_dma.o
-apple_dma-y := apple_dma_main.o apple_dma_trace.o \
-	quirks/dczid_patch.o quirks/tso_patch.o quirks/uvm_page_patch.o
+apple_dma-y := apple_dma_main.o apple_dma_trace.o
+ifeq ($(ARCH),arm64)
+apple_dma-y += quirks/dczid_patch.o quirks/tso_patch.o quirks/uvm_page_patch.o
+endif
 
 all:
 	$(MAKE) -C $(KERNELDIR) M=$(CURDIR) modules

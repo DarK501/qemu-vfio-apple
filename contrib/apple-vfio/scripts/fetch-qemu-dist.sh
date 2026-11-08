@@ -55,6 +55,18 @@ source "$PIN"
 : "${QEMU_DIST_TAG:?pin file missing QEMU_DIST_TAG}"
 : "${QEMU_DIST_SHA256:?pin file missing QEMU_DIST_SHA256}"
 
+if [ -z "${QEMU_DIST_TARGET:-}" ]; then
+    case "$(uname -m)" in
+        arm64) QEMU_DIST_TARGET="aarch64" ;;
+        x86_64) QEMU_DIST_TARGET="x86_64" ;;
+        *) echo "fetch-qemu-dist: unsupported host architecture: $(uname -m)" >&2; exit 1 ;;
+    esac
+fi
+case "$QEMU_DIST_TARGET" in
+    aarch64|x86_64) ;;
+    *) echo "fetch-qemu-dist: unsupported QEMU target: $QEMU_DIST_TARGET" >&2; exit 1 ;;
+esac
+
 # Split "ghcr.io/owner/name" into registry + repo path. The repo path is
 # everything after the first slash, since ghcr expects it that way in the
 # v2 API path and the token scope.
@@ -77,10 +89,10 @@ FORCE="${QEMU_DIST_FORCE:-0}"
 
 mkdir -p "$CACHE_DIR"
 
-# Cache hit: stamp matches pin AND extracted dist has the binaries we need.
+# Cache hit: stamp matches pin AND extracted dist has the requested target.
 if [ "$FORCE" != "1" ] \
     && [ -f "$STAMP_FILE" ] \
-    && [ -f "$DIST_DIR/qemu-system-aarch64" ] \
+    && [ -f "$DIST_DIR/qemu-system-$QEMU_DIST_TARGET" ] \
     && [ -f "$DIST_DIR/qemu-img" ] \
     && [ "$(cat "$STAMP_FILE")" = "$QEMU_DIST_SHA256" ]; then
     echo "fetch-qemu-dist: using cached dist (sha256 ${QEMU_DIST_SHA256:0:12}…)" >&2
@@ -92,7 +104,7 @@ fi
 # so an offline rebuild doesn't break a previously-working setup.
 fall_back_to_stale_cache() {
     if [ -f "$STAMP_FILE" ] \
-        && [ -f "$DIST_DIR/qemu-system-aarch64" ] \
+        && [ -f "$DIST_DIR/qemu-system-$QEMU_DIST_TARGET" ] \
         && [ -f "$DIST_DIR/qemu-img" ]; then
         echo "fetch-qemu-dist: $1; reusing stale cache at $DIST_DIR" >&2
         echo "$DIST_DIR"
@@ -243,8 +255,8 @@ echo "fetch-qemu-dist: extracting to $DIST_DIR" >&2
 # dist/ entry, so strip-components=1 lands its contents in $DIST_DIR.
 tar -xzf "$TARBALL" -C "$DIST_DIR" --strip-components=1
 
-if [ ! -f "$DIST_DIR/qemu-system-aarch64" ] || [ ! -f "$DIST_DIR/qemu-img" ]; then
-    echo "fetch-qemu-dist: extracted dist looks malformed (missing qemu binaries)" >&2
+if [ ! -f "$DIST_DIR/qemu-system-$QEMU_DIST_TARGET" ] || [ ! -f "$DIST_DIR/qemu-img" ]; then
+    echo "fetch-qemu-dist: extracted dist is missing qemu-system-$QEMU_DIST_TARGET or qemu-img" >&2
     rm -rf "$DIST_DIR"
     exit 1
 fi

@@ -9,11 +9,60 @@ bundled into `VFIOUserHostApp`.
 
 ## Current approach
 
-This first iteration uses Ubuntu's official arm64 **cloud image** as the base
-and then provisions it into a desktop image on first boot.
+The builder supports Ubuntu's official arm64 or amd64 **cloud image** as the
+base and provisions it into a desktop image on first boot. `GUEST_ARCH`
+defaults to the host architecture (`arm64` on Apple Silicon, `x86_64` on
+Intel); set it explicitly to select another target.
 
 The current default target is Ubuntu 26.04 LTS (`resolute`, Resolute Raccoon)
-for arm64.
+for arm64. The x86_64 target uses the matching amd64 cloud image,
+`qemu-system-x86_64`, the `q35` machine, and x86_64 UEFI firmware.
+
+**Intel passthrough is experimental and unverified.** Neither the Darwin
+backend nor the guest DMA module has been validated end-to-end on an Intel
+Mac with macOS 15.8. The guest module currently rejects coalesced or
+non-identity original scatter-gather mappings, a direct SG backend without
+DMA operations, and host mappings whose segments are not contiguous for a
+single guest range. It also requires a kernel with per-device DMA operations.
+These limitations can prevent passthrough workloads from working.
+
+The DMA companion must share the matching `vfio-apple-pci` connection; the
+normal `dma-companion=on` configuration creates it automatically. Standalone
+companions must be realized after their matching VFIO device, and a second
+companion for the same host device is rejected. If the VFIO owner is removed
+before a separately configured companion, new DMA maps are rejected; the
+companion can still request unmaps of its existing mappings.
+
+The DMA companion inhibits QEMU RAM discard while it is active, so configurations
+that require RAM discard cannot be used with it. This does not synchronize
+concurrent discards such as postcopy migration. If DMA teardown fails, QEMU
+retains the connection and RAM mappings until process exit; that is not a
+guarantee that the device is quiescent or that shutdown is safe. Unplug,
+process exit, and DriverKit shutdown remain unverified.
+If the DriverKit registration reply is lost or malformed, mapping ownership
+is unknown. The companion retains the backing and refuses to unregister a
+potentially unrelated mapping; the guest treats the failed unmap as fatal.
+The dext allows unclaimed clients to query device identity, but PCI access
+and DMA operations require an exclusive claim. Claims are reserved atomically
+because DriverKit's default dispatch queue belongs to each `IOUserClient`:
+see Apple's [IOService][driverkit-service] and [IOUserClient][driverkit-client]
+declarations. If DMA completion fails during client shutdown, later claims
+are blocked and the user-client stop is refused with its claim and DMA backing
+retained for cleanup retry. This deliberately leaves the device unavailable
+if retries continue to fail; it does not guarantee that DriverKit or the
+operating system will preserve the service through forced termination. Device
+quiescence and shutdown safety remain unverified.
+Interrupt-source cancellation is asynchronous. The client stop retains its
+state and returns `kIOReturnStillOpen` until cancellation completes. A later
+Stop invocation is required to finish cleanup; automatic retry behavior is not
+verified, and DriverKit may still force teardown.
+The connection, claim, BAR isolation, mapping, response and teardown mock
+checks run from the repository root with
+`python3 contrib/apple-dma/tests/run_tests.py`. They require C and C++
+compilers and do not replace macOS builds or hardware testing.
+
+[driverkit-service]: https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.81.4/iokit/DriverKit/IOService.iig
+[driverkit-client]: https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.81.4/iokit/DriverKit/IOUserClient.iig
 
 That is a deliberate compromise:
 
@@ -30,7 +79,7 @@ priority is to start generating a working prebaked image.
 
 `build-ubuntu-desktop-image.sh`:
 
-1. downloads the official Ubuntu arm64 cloud image
+1. downloads the official Ubuntu cloud image for `GUEST_ARCH`
 2. creates a writable build disk on top of it
 3. boots that disk under QEMU/HVF with a `cloud-init` seed
 4. installs `ubuntu-desktop` and desktop-adjacent runtime packages
@@ -47,11 +96,11 @@ The initial provisioning flow is intentionally conservative:
 - `ubuntu-desktop` is installed and configured as the default target
 - `qemu-guest-agent` and a few desktop-friendly packages are added
 - image cleanup is performed so the result behaves like a reusable golden image
-- FEX is wired by default and ships with:
+- On the default arm64 target, FEX is wired by default and ships with:
   - the official Ubuntu 24.04 RootFS extracted into a directory tree
   - a minimal `Config.json` enabling only the GL and Vulkan thunks
   - per-app overrides for the Steam `client` and `steamwebhelper`
-- NVIDIA is wired by default: the latest `nvidia-driver-XXX(-open)` package is
+- On arm64, NVIDIA is wired by default: the latest `nvidia-driver-XXX(-open)` package is
   installed in the guest, and the matching x86_64 `.run` file is unpacked into
   the FEX RootFS so DLSS / NGX work for x86 binaries (Proton, etc.)
 - `apple-dma` is wired by default: the kernel module sources from
@@ -62,7 +111,8 @@ The initial provisioning flow is intentionally conservative:
 - Steam is installed by default from Valve's official `steam_latest.deb`
   (`dpkg -i --force-all`) — the launcher runs natively on arm64 and FEX-Emu
   transparently emulates the x86_64 Steam bootstrap + steamwebhelper using
-  the Ubuntu 24.04 FEX RootFS
+  the Ubuntu 24.04 FEX RootFS. On x86_64, FEX and the arm64-specific NVIDIA
+  setup default to disabled.
 
 This lets us start producing a real desktop artifact before we lock down the
 rest of the guest stack.
@@ -70,7 +120,7 @@ rest of the guest stack.
 ## Requirements
 
 - built QEMU binaries at either `dist/` or `build/`
-- working arm64 firmware blobs in `build/pc-bios/`
+- architecture-matched firmware blobs in `build/pc-bios/`
 - `python3`
 - `curl`
 - `hdiutil` (macOS)
@@ -79,15 +129,29 @@ rest of the guest stack.
 
 ## Usage
 
-From the repository root:
+From the repository root, the default build matches the host architecture:
 
 ```bash
 ./contrib/apple-vfio/image-builder/build-ubuntu-desktop-image.sh
 ```
 
-The default output directory is intended to be reused across runs. Re-running
-the builder in `contrib/apple-vfio/image-builder/out/ubuntu-desktop-image`
-replaces the transient work files and refreshes the default artifact in place.
+Build an x86_64 guest image with Intel firmware and QEMU:
+
+```bash
+GUEST_ARCH=x86_64 \
+./contrib/apple-vfio/image-builder/build-ubuntu-desktop-image.sh
+```
+
+On an Intel Mac, the launcher defaults to x86_64; `--arch x86_64` selects
+the x86_64 image tag, `qemu-system-x86_64`, `q35`, and x86 UEFI files. The
+build/edit/seal helpers require `GUEST_ARCH` to match the host because these
+flows use HVF rather than cross-architecture emulation. The published QEMU
+dist must contain the host target binary before the app can embed it.
+
+The output directory is architecture-specific by default:
+`out/ubuntu-desktop-image` for arm64 and
+`out/ubuntu-desktop-image-x86_64` for x86_64. Re-running a builder reuses its
+directory and refreshes that architecture's artifact.
 
 To override defaults:
 
@@ -104,6 +168,8 @@ INSTALL_APPLE_DMA=1 \
 Useful knobs:
 
 - `IMAGE_NAME`: artifact basename
+- `GUEST_ARCH`: `arm64` or `x86_64` (defaults to host architecture); selects the QEMU binary,
+  machine type, cloud image, and UEFI firmware
 - `DISK_SIZE`: writable build disk size, default `96G`
 - `CPUS`: builder vCPU count, default `8`
 - `MEMORY`: builder RAM, default `12G`
@@ -111,13 +177,13 @@ Useful knobs:
 - `BUILD_PASSWORD`: plaintext password set for `BUILD_USER` inside the guest
   during provisioning, default `ubuntu`
 - `QEMU_DATA_DIR`: override the QEMU firmware/data directory passed via `-L`
-- `EFI_CODE_SRC`: override path to `edk2-aarch64-code.fd`
-- `EFI_VARS_SRC`: override path to `edk2-arm-vars.fd` or another arm64 vars file
+- `EFI_CODE_SRC`: override path to the architecture-appropriate UEFI code file
+- `EFI_VARS_SRC`: override path to the architecture-appropriate UEFI vars file
 - by default the builder now also checks `build/qemu-bundle/usr/local/share/qemu/`
   for those firmware blobs
-- `INSTALL_FEX`: `1` by default
+- `INSTALL_FEX`: `1` by default on arm64, `0` on x86_64
 - `INSTALL_STEAM`: `1` by default
-- `INSTALL_NVIDIA`: `1` by default
+- `INSTALL_NVIDIA`: `1` by default on arm64, `0` on x86_64
 - `INSTALL_APPLE_DMA`: `1` by default
 - `APPLE_DMA_SRC_DIR`: source dir tarred into the guest, default
   `contrib/apple-dma/linux`
@@ -141,8 +207,10 @@ let you do that manually and then turn the result back into a reusable
 golden image:
 
 ```bash
+GUEST_ARCH=x86_64 \
 ./contrib/apple-vfio/image-builder/edit-image.sh
 # click / type whatever you need; shut down from inside the VM.
+GUEST_ARCH=x86_64 \
 ./contrib/apple-vfio/image-builder/seal-image.sh
 ```
 

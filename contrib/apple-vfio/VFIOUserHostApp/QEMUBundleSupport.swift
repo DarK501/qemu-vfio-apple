@@ -16,11 +16,11 @@ import Foundation
 /// the install/uninstall actions iterate in (and the order shown in errors).
 ///
 /// `qemu-vfio-apple` is always present in the bundle (built by embed-qemu.sh).
-/// When a `dist/` directory is available at build time, both
-/// `qemu-system-aarch64` and `qemu-img` are embedded and wrapped.
+/// When a `dist/` directory is available at build time, available
+/// `qemu-system-*` targets and `qemu-img` are embedded and wrapped.
 /// `installCli` skips tools that aren't present in the bundle so a UI-only
 /// build still installs just the qemu-vfio-apple wrapper.
-let kCliTools = ["qemu-system-aarch64", "qemu-img", "qemu-vfio-apple"]
+let kCliTools = ["qemu-system-aarch64", "qemu-system-x86_64", "qemu-img", "qemu-vfio-apple"]
 
 // MARK: - Bundle layout
 
@@ -32,7 +32,13 @@ struct BundleLayout {
     var frameworksURL:  URL { contentsURL.appendingPathComponent("Frameworks") }
     var resourcesURL:   URL { contentsURL.appendingPathComponent("Resources") }
     var shareURL:       URL { resourcesURL.appendingPathComponent("share/qemu") }
-    var qemuBinaryURL:  URL { macOSURL.appendingPathComponent("qemu-system-aarch64") }
+    var hostQemuBinaryURL: URL {
+        #if arch(x86_64)
+        return macOSURL.appendingPathComponent("qemu-system-x86_64")
+        #else
+        return macOSURL.appendingPathComponent("qemu-system-aarch64")
+        #endif
+    }
     var cliBinaryURL:   URL { macOSURL.appendingPathComponent("qemu-vfio-apple") }
     var hostBinaryURL:  URL { Bundle.main.executableURL ?? macOSURL.appendingPathComponent("VFIOUserHostApp") }
 
@@ -41,7 +47,7 @@ struct BundleLayout {
     }
 
     var isQemuBundled: Bool {
-        FileManager.default.fileExists(atPath: qemuBinaryURL.path)
+        FileManager.default.fileExists(atPath: hostQemuBinaryURL.path)
     }
 
     var isCliBundled: Bool {
@@ -90,7 +96,7 @@ func cliInstallDir() -> URL {
 
 /// Returns the wrapper script body we want to install for `tool` given the
 /// current bundle layout. The wrapper is a thin `exec` shim into the bundled
-/// binary; for `qemu-system-aarch64` we also inject `-L <bundled-firmware>`
+/// binary; for QEMU system targets we also inject `-L <bundled-firmware>`
 /// so users never have to pass it manually. Other tools like `qemu-img` use a
 /// plain passthrough wrapper.
 func cliWrapperContent(_ layout: BundleLayout, tool: String) -> String {
@@ -102,7 +108,7 @@ func cliWrapperContent(_ layout: BundleLayout, tool: String) -> String {
         """
 
     switch tool {
-    case "qemu-system-aarch64":
+    case "qemu-system-aarch64", "qemu-system-x86_64":
         let share = layout.shareURL.path
         return """
             \(header)

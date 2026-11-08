@@ -10,7 +10,8 @@
 
 #include <linux/vfio.h>
 
-#include "apple-dext-client.h"
+#include "apple-host-backend.h"
+#include "hw/pci/pci.h"
 #include "hw/vfio/apple.h"
 #include "hw/vfio/vfio-device.h"
 #include "hw/vfio/vfio-listener.h"
@@ -99,11 +100,10 @@ static AppleVFIOContainer *apple_vfio_container_connect(AddressSpace *as,
         goto fail_unref;
     }
 
-    container->dext_conn = apple_dext_connect_with_root(container->host_bus,
-                                                        container->host_device,
-                                                        container->host_function,
-                                                        container->host_root,
-                                                        &connect_err);
+    container->dext_conn =
+        apple_host_backend()->client->connect_with_root(
+            container->host_bus, container->host_device,
+            container->host_function, container->host_root, &connect_err);
     if (container->dext_conn == IO_OBJECT_NULL) {
         if (connect_err) {
             error_setg(errp, "vfio-apple: %s", connect_err);
@@ -118,7 +118,8 @@ static AppleVFIOContainer *apple_vfio_container_connect(AddressSpace *as,
         goto fail_discards;
     }
 
-    if (apple_dext_claim(container->dext_conn) != KERN_SUCCESS) {
+    if (apple_host_backend()->client->claim(container->dext_conn) !=
+        KERN_SUCCESS) {
         error_setg(errp,
                    "vfio-apple: failed to claim dext-backed PCI device "
                    "%02x:%02x.%x",
@@ -130,6 +131,9 @@ static AppleVFIOContainer *apple_vfio_container_connect(AddressSpace *as,
     if (!apple_vfio_dext_publish(container->host_bus, container->host_device,
                                  container->host_function,
                                  container->host_root,
+                                 PCI_BUILD_BDF(
+                                     pci_dev_bus_num(PCI_DEVICE(vdev)),
+                                     PCI_DEVICE(vdev)->devfn),
                                  container->dext_conn)) {
         error_setg(errp,
                    "vfio-apple: duplicate dext owner for host PCI %02x:%02x.%x"
@@ -172,7 +176,7 @@ fail_unref:
     return NULL;
 
 fail_release_conn:
-    apple_dext_disconnect(container->dext_conn);
+    apple_host_backend()->client->disconnect(container->dext_conn);
     container->dext_conn = IO_OBJECT_NULL;
     goto fail_discards;
 }

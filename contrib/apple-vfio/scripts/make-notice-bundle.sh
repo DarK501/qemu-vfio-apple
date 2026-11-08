@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Build a notice bundle to accompany binary distributions of VFIOUserHostApp
-# when it embeds qemu-system-aarch64 and its third-party runtime dependencies.
+# when it embeds QEMU system targets and their third-party runtime dependencies.
 #
 # This generator creates a release-time notice bundle with:
 #   - a manifest describing the bundled payload
@@ -66,7 +66,7 @@ Component: qemu
 Source-Type: local-repository
 Repository: https://gitlab.com/qemu-project/qemu
 Download-Page: https://www.qemu.org/download/
-Notes: The bundled qemu-system-aarch64 binary is built from this repository.
+Notes: Bundled qemu-system-* binaries are built from this repository.
 EOF
 
 cat > "$LICENSE_DIR/edk2/SOURCE_INFO.txt" <<'EOF'
@@ -417,10 +417,11 @@ Before publishing a binary release, record the exact source revision used for:
 
 EOF
 
-if [ -d "$DIST_DIR/lib" ] || [ -f "$DIST_DIR/qemu-system-aarch64" ] || [ -d "$DIST_DIR/share/qemu" ]; then
+if [ -d "$DIST_DIR/lib" ] || [ -f "$DIST_DIR/qemu-system-aarch64" ] || \
+   [ -f "$DIST_DIR/qemu-system-x86_64" ] || [ -d "$DIST_DIR/share/qemu" ]; then
     {
         printf -- "### Binary and library payload\n\n"
-        artifact_lines "$DIST_DIR/qemu-system-aarch64"
+        artifact_lines "$DIST_DIR/qemu-system-*"
         artifact_lines "$DIST_DIR/qemu-img"
         artifact_lines "$DIST_DIR/lib/*.dylib"
         printf -- "\n### Firmware and data payload\n\n"
@@ -441,7 +442,7 @@ cat >> "$OUT_DIR/THIRD_PARTY_NOTICES.md" <<'EOF'
 ### QEMU
 
 - Distributed artifacts:
-  - `qemu-system-aarch64`
+  - `qemu-system-aarch64` and/or `qemu-system-x86_64`
   - `qemu-img`
   - `share/qemu/descriptors/*`
   - `share/qemu/keymaps/*` when present

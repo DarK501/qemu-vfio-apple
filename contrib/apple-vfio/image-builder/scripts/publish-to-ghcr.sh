@@ -7,7 +7,8 @@
 # The artifact ends up at:
 #
 #   ghcr.io/scottjg/qemu-vfio-apple-images:<name>           (immutable)
-#   ghcr.io/scottjg/qemu-vfio-apple-images:latest           (rolling)
+#   ghcr.io/scottjg/qemu-vfio-apple-images:latest-arm64      (rolling)
+#   ghcr.io/scottjg/qemu-vfio-apple-images:latest-x86_64     (rolling)
 #
 # qemu-vfio-apple speaks the OCI registry API directly (no oras runtime
 # needed on the client) but `oras` is by far the simplest way to *push*
@@ -28,7 +29,7 @@
 #   GHCR_REPO          registry path (default: ghcr.io/scottjg/qemu-vfio-apple-images)
 #   SOURCE_REPO_URL    OCI annotation linking the artifact to a source repo
 #                      (default: https://github.com/scottjg/qemu-vfio-apple)
-#   ALSO_TAG_LATEST    set to 0 to skip the :latest tag push
+#   ALSO_TAG_LATEST    set to 0 to skip architecture rolling tags
 #
 # Intentionally *not* shipping base+delta qcow2 layering yet — each
 # release gets a single-blob manifest. The layering can be added later
@@ -111,6 +112,11 @@ manifest_count=$(find "$ARTIFACT_DIR" -maxdepth 1 -name '*.manifest.json' | wc -
 
 MANIFEST_JSON=$(find "$ARTIFACT_DIR" -maxdepth 1 -name '*.manifest.json')
 IMAGE_NAME=$(jq -r '.name'     "$MANIFEST_JSON")
+GUEST_ARCH=$(jq -r '.guest_arch // "arm64"' "$MANIFEST_JSON")
+case "$GUEST_ARCH" in
+    arm64|x86_64) ;;
+    *) die "unsupported guest_arch in manifest: $GUEST_ARCH" ;;
+esac
 ARTIFACT_FN=$(jq -r '.artifact' "$MANIFEST_JSON")
 ARTIFACT_PATH="$ARTIFACT_DIR/$ARTIFACT_FN"
 SHA256=$(jq -r '.sha256'       "$MANIFEST_JSON")
@@ -139,28 +145,34 @@ pushd "$work" >/dev/null
 
 artifact_type="application/vnd.scottjg.qemu-vfio.image.v1"
 
-# Push once under the immutable name, then use `oras tag` to alias
-# :latest to the same manifest. We can't just push twice: oras stamps
+# Push once under the immutable name, then use `oras tag` to alias the
+# architecture-specific rolling tag to the same manifest. We can't just
+# push twice: oras stamps
 # `org.opencontainers.image.created` into the manifest annotations on
 # every push, so two back-to-back pushes of the same content produce
 # two manifests with different digests (same blob digests, but the
 # manifest bytes differ by a few seconds in the timestamp). That's
 # confusing on the registry UI and breaks any consumer that pins by
-# manifest digest. Aliasing keeps :latest and :<name> pointing at the
-# byte-identical manifest.
+# manifest digest. Aliasing keeps the rolling architecture tag and
+# immutable name pointing at the byte-identical manifest.
 log "pushing $GHCR_REPO:$IMAGE_NAME"
 oras push "$GHCR_REPO:$IMAGE_NAME" \
     --artifact-type "$artifact_type" \
     --annotation "org.opencontainers.image.source=$SOURCE_REPO_URL" \
     --annotation "org.opencontainers.image.title=$IMAGE_NAME" \
-    --annotation "org.opencontainers.image.description=apple-vfio prebaked Ubuntu Desktop aarch64 (qcow2, single blob)" \
+    --annotation "org.opencontainers.image.description=apple-vfio prebaked Ubuntu Desktop $GUEST_ARCH (qcow2, single blob)" \
     --annotation "org.opencontainers.image.licenses=GPL-2.0" \
     "$ARTIFACT_FN:application/vnd.scottjg.qemu-vfio.qcow2" \
     "manifest.json:application/vnd.scottjg.qemu-vfio.image.manifest.v1+json"
 
 if [ "$ALSO_TAG_LATEST" = "1" ]; then
-    log "aliasing $GHCR_REPO:latest -> $GHCR_REPO:$IMAGE_NAME"
-    oras tag "$GHCR_REPO:$IMAGE_NAME" latest
+    latest_tag="latest-$GUEST_ARCH"
+    log "aliasing $GHCR_REPO:$latest_tag -> $GHCR_REPO:$IMAGE_NAME"
+    oras tag "$GHCR_REPO:$IMAGE_NAME" "$latest_tag"
+    if [ "$GUEST_ARCH" = "arm64" ]; then
+        log "aliasing legacy $GHCR_REPO:latest -> $GHCR_REPO:$IMAGE_NAME"
+        oras tag "$GHCR_REPO:$IMAGE_NAME" latest
+    fi
 fi
 
 popd >/dev/null
@@ -168,5 +180,5 @@ popd >/dev/null
 log "done. pull with:"
 log "  qemu-vfio-apple pull --image $GHCR_REPO:$IMAGE_NAME"
 if [ "$ALSO_TAG_LATEST" = "1" ]; then
-    log "  qemu-vfio-apple pull --image $GHCR_REPO:latest"
+    log "  qemu-vfio-apple pull --image $GHCR_REPO:latest-$GUEST_ARCH"
 fi

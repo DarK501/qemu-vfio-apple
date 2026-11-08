@@ -172,7 +172,7 @@ typedef struct DextCandidate {
 #define APPLE_DEXT_MAX_CANDIDATES 16
 
 io_connect_t
-apple_dext_connect_with_root(uint8_t bus, uint8_t device, uint8_t function,
+apple_dext_client_connect_with_root(uint8_t bus, uint8_t device, uint8_t function,
                              const char *host_root, char **errp)
 {
     CFMutableDictionaryRef matching;
@@ -332,13 +332,13 @@ apple_dext_connect_with_root(uint8_t bus, uint8_t device, uint8_t function,
 }
 
 io_connect_t
-apple_dext_connect(uint8_t bus, uint8_t device, uint8_t function)
+apple_dext_client_connect(uint8_t bus, uint8_t device, uint8_t function)
 {
-    return apple_dext_connect_with_root(bus, device, function, NULL, NULL);
+    return apple_dext_client_connect_with_root(bus, device, function, NULL, NULL);
 }
 
 void
-apple_dext_disconnect(io_connect_t connection)
+apple_dext_client_disconnect(io_connect_t connection)
 {
     if (connection != IO_OBJECT_NULL) {
         IOServiceClose(connection);
@@ -346,7 +346,7 @@ apple_dext_disconnect(io_connect_t connection)
 }
 
 kern_return_t
-apple_dext_claim(io_connect_t connection)
+apple_dext_client_claim(io_connect_t connection)
 {
     if (connection == IO_OBJECT_NULL) {
         return kIOReturnBadArgument;
@@ -359,44 +359,79 @@ apple_dext_claim(io_connect_t connection)
 }
 
 kern_return_t
-apple_dext_register_dma(io_connect_t connection,
+apple_dext_client_register_dma(io_connect_t connection,
                             uint64_t iova,
                             uint64_t client_va,
                             uint64_t size,
-                            uint64_t *out_bus_addr,
-                            uint64_t *out_bus_len)
+                            AppleDMAMapResult *out_result,
+                            AppleDMARegistrationState *out_state)
 {
     uint64_t input[3] = { iova, client_va, size };
-    uint64_t output[3] = {0};
-    uint32_t outputCount = 3;
+    size_t outputSize = sizeof(*out_result);
     kern_return_t kr;
 
-    if (connection == IO_OBJECT_NULL) {
+    if (out_state == NULL) {
+        return kIOReturnBadArgument;
+    }
+    *out_state = APPLE_DMA_REGISTRATION_NONE;
+    if (connection == IO_OBJECT_NULL || out_result == NULL) {
         return kIOReturnBadArgument;
     }
 
+    *out_state = APPLE_DMA_REGISTRATION_UNKNOWN;
     kr = IOConnectCallMethod(connection,
                              kSelectorRegisterDMARegion,
                              input, 3,
                              NULL, 0,
-                             output, &outputCount,
-                             NULL, NULL);
+                             NULL, NULL,
+                             out_result, &outputSize);
     if (kr != KERN_SUCCESS) {
         return kr;
     }
 
-    if (out_bus_addr != NULL && outputCount >= 2) {
-        *out_bus_addr = output[1];
+    if (outputSize != sizeof(*out_result) ||
+        out_result->mapping_id != iova) {
+        return kIOReturnNotAligned;
     }
-    if (out_bus_len != NULL && outputCount >= 3) {
-        *out_bus_len = output[2];
+    if (out_result->status == APPLE_DMA_MAP_STATUS_ERROR &&
+        out_result->segment_count == 0) {
+        *out_state = APPLE_DMA_REGISTRATION_NONE;
+        return kIOReturnError;
+    }
+    if (out_result->status == APPLE_DMA_MAP_STATUS_RETAINED &&
+        out_result->segment_count == 0) {
+        *out_state = APPLE_DMA_REGISTRATION_OWNED;
+        return kIOReturnStillOpen;
     }
 
+    if (out_result->status != APPLE_DMA_MAP_STATUS_OK ||
+        out_result->segment_count == 0 ||
+        out_result->segment_count > APPLE_DMA_MAX_SEGMENTS) {
+        return kIOReturnNotAligned;
+    }
+
+    uint64_t covered = 0;
+    for (uint32_t i = 0; i < out_result->segment_count; i++) {
+        AppleDMASegment *segment = &out_result->segments[i];
+
+        if (!segment->length || covered > size ||
+            segment->offset != covered ||
+            segment->length > size - covered ||
+            segment->length - 1 > UINT64_MAX - segment->address) {
+            return kIOReturnNotAligned;
+        }
+        covered += segment->length;
+    }
+    if (covered != size) {
+        return kIOReturnNotAligned;
+    }
+
+    *out_state = APPLE_DMA_REGISTRATION_OWNED;
     return kIOReturnSuccess;
 }
 
 kern_return_t
-apple_dext_allocate_dma_buffer(io_connect_t connection,
+apple_dext_client_allocate_dma_buffer(io_connect_t connection,
                                uint64_t size,
                                uint64_t alignment,
                                uint64_t *out_bus_addr,
@@ -451,7 +486,7 @@ apple_dext_allocate_dma_buffer(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_free_dma_buffer(io_connect_t connection,
+apple_dext_client_free_dma_buffer(io_connect_t connection,
                            mach_vm_address_t addr)
 {
     kern_return_t kr;
@@ -460,19 +495,18 @@ apple_dext_free_dma_buffer(io_connect_t connection,
         return kIOReturnBadArgument;
     }
 
-    if (addr != 0) {
-        IOConnectUnmapMemory64(connection, 0, mach_task_self(), addr);
-    }
-
     kr = IOConnectCallMethod(connection,
                              kSelectorFreeDMABuffer,
                              NULL, 0, NULL, 0,
                              NULL, NULL, NULL, NULL);
+    if (kr == KERN_SUCCESS && addr != 0) {
+        kr = IOConnectUnmapMemory64(connection, 0, mach_task_self(), addr);
+    }
     return kr;
 }
 
 kern_return_t
-apple_dext_unregister_dma(io_connect_t connection,
+apple_dext_client_unregister_dma(io_connect_t connection,
                               uint64_t iova)
 {
     uint64_t input[1] = { iova };
@@ -490,7 +524,7 @@ apple_dext_unregister_dma(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_probe_dma(io_connect_t connection,
+apple_dext_client_probe_dma(io_connect_t connection,
                          uint64_t iova,
                          uint64_t offset,
                          uint64_t *out_word)
@@ -519,7 +553,7 @@ apple_dext_probe_dma(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_config_read(io_connect_t connection,
+apple_dext_client_config_read(io_connect_t connection,
                            uint64_t offset,
                            uint64_t width,
                            uint64_t *out_value)
@@ -548,7 +582,7 @@ apple_dext_config_read(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_config_write(io_connect_t connection,
+apple_dext_client_config_write(io_connect_t connection,
                             uint64_t offset,
                             uint64_t width,
                             uint64_t value)
@@ -568,7 +602,7 @@ apple_dext_config_write(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_config_read_block(io_connect_t connection,
+apple_dext_client_config_read_block(io_connect_t connection,
                                  uint64_t offset,
                                  void *buf,
                                  size_t len)
@@ -586,7 +620,7 @@ apple_dext_config_read_block(io_connect_t connection,
         uint32_t dword;
         kern_return_t kr;
 
-        kr = apple_dext_config_read(connection, pos, 4, &val);
+        kr = apple_dext_client_config_read(connection, pos, 4, &val);
         if (kr != KERN_SUCCESS) {
             return kr;
         }
@@ -601,7 +635,7 @@ apple_dext_config_read_block(io_connect_t connection,
         uint64_t val = 0;
         kern_return_t kr;
 
-        kr = apple_dext_config_read(connection, pos, 1, &val);
+        kr = apple_dext_client_config_read(connection, pos, 1, &val);
         if (kr != KERN_SUCCESS) {
             return kr;
         }
@@ -615,7 +649,7 @@ apple_dext_config_read_block(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_get_bar_info(io_connect_t connection,
+apple_dext_client_get_bar_info(io_connect_t connection,
                             uint8_t bar,
                             uint8_t *out_mem_idx,
                             uint64_t *out_size,
@@ -654,7 +688,7 @@ apple_dext_get_bar_info(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_map_bar(io_connect_t connection,
+apple_dext_client_map_bar(io_connect_t connection,
                        uint8_t bar,
                        mach_vm_address_t *out_addr,
                        mach_vm_size_t *out_size,
@@ -672,7 +706,7 @@ apple_dext_map_bar(io_connect_t connection,
         return kIOReturnBadArgument;
     }
 
-    kr = apple_dext_get_bar_info(connection, bar, NULL,
+    kr = apple_dext_client_get_bar_info(connection, bar, NULL,
                                      &bar_size, &bar_type);
     if (kr != KERN_SUCCESS) {
         return kr;
@@ -706,7 +740,7 @@ apple_dext_map_bar(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_unmap_bar(io_connect_t connection,
+apple_dext_client_unmap_bar(io_connect_t connection,
                          uint8_t bar,
                          mach_vm_address_t addr)
 {
@@ -720,7 +754,7 @@ apple_dext_unmap_bar(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_mmio_read(io_connect_t connection,
+apple_dext_client_mmio_read(io_connect_t connection,
                          uint8_t mem_idx,
                          uint64_t offset,
                          uint64_t width,
@@ -750,7 +784,7 @@ apple_dext_mmio_read(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_mmio_write(io_connect_t connection,
+apple_dext_client_mmio_write(io_connect_t connection,
                           uint8_t mem_idx,
                           uint64_t offset,
                           uint64_t width,
@@ -771,7 +805,7 @@ apple_dext_mmio_write(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_setup_interrupts(io_connect_t connection,
+apple_dext_client_setup_interrupts(io_connect_t connection,
                                 uint32_t *out_num_vectors)
 {
     uint64_t output[1] = {0};
@@ -800,7 +834,7 @@ apple_dext_setup_interrupts(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_reset_device(io_connect_t connection)
+apple_dext_client_reset_device(io_connect_t connection)
 {
     if (connection == IO_OBJECT_NULL) {
         return kIOReturnBadArgument;
@@ -813,7 +847,7 @@ apple_dext_reset_device(io_connect_t connection)
 }
 
 kern_return_t
-apple_dext_set_irq_mask(io_connect_t connection, const uint64_t mask[4])
+apple_dext_client_set_irq_mask(io_connect_t connection, const uint64_t mask[4])
 {
     if (connection == IO_OBJECT_NULL || mask == NULL) {
         return kIOReturnBadArgument;
@@ -828,7 +862,7 @@ apple_dext_set_irq_mask(io_connect_t connection, const uint64_t mask[4])
 }
 
 kern_return_t
-apple_dext_read_pending_irqs(io_connect_t connection, uint64_t pending[4])
+apple_dext_client_read_pending_irqs(io_connect_t connection, uint64_t pending[4])
 {
     uint64_t output[4] = {0};
     uint32_t outputCount = 4;
@@ -866,7 +900,7 @@ struct AppleDextInterruptNotify {
 };
 
 static void
-apple_dext_async_callback(void *refcon, IOReturn result,
+apple_dext_client_async_callback(void *refcon, IOReturn result,
                           void **args, uint32_t numArgs)
 {
     AppleDextInterruptNotify *notify = refcon;
@@ -877,12 +911,12 @@ apple_dext_async_callback(void *refcon, IOReturn result,
 }
 
 static kern_return_t
-apple_dext_interrupt_notify_arm(AppleDextInterruptNotify *notify)
+apple_dext_client_interrupt_notify_arm(AppleDextInterruptNotify *notify)
 {
     uint64_t asyncRef[kIOAsyncCalloutCount];
 
     asyncRef[kIOAsyncCalloutFuncIndex] =
-        (uint64_t)(uintptr_t)apple_dext_async_callback;
+        (uint64_t)(uintptr_t)apple_dext_client_async_callback;
     asyncRef[kIOAsyncCalloutRefconIndex] =
         (uint64_t)(uintptr_t)notify;
 
@@ -895,7 +929,7 @@ apple_dext_interrupt_notify_arm(AppleDextInterruptNotify *notify)
 }
 
 AppleDextInterruptNotify *
-apple_dext_interrupt_notify_create(io_connect_t connection,
+apple_dext_client_interrupt_notify_create(io_connect_t connection,
                                    void (*handler_fn)(void *opaque),
                                    void *opaque)
 {
@@ -923,7 +957,7 @@ apple_dext_interrupt_notify_create(io_connect_t connection,
                                        notify->dispatchQueue);
     notify->machPort = IONotificationPortGetMachPort(notify->notifyPort);
 
-    kr = apple_dext_interrupt_notify_arm(notify);
+    kr = apple_dext_client_interrupt_notify_arm(notify);
     if (kr != KERN_SUCCESS) {
         IONotificationPortDestroy(notify->notifyPort);
         dispatch_release(notify->dispatchQueue);
@@ -935,16 +969,16 @@ apple_dext_interrupt_notify_create(io_connect_t connection,
 }
 
 kern_return_t
-apple_dext_interrupt_notify_rearm(AppleDextInterruptNotify *notify)
+apple_dext_client_interrupt_notify_rearm(AppleDextInterruptNotify *notify)
 {
     if (!notify) {
         return kIOReturnBadArgument;
     }
-    return apple_dext_interrupt_notify_arm(notify);
+    return apple_dext_client_interrupt_notify_arm(notify);
 }
 
 void
-apple_dext_interrupt_notify_destroy(AppleDextInterruptNotify *notify)
+apple_dext_client_interrupt_notify_destroy(AppleDextInterruptNotify *notify)
 {
     if (!notify) {
         return;

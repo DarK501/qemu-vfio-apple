@@ -7,7 +7,7 @@
 //   - enumerating host PCI devices so the user can see what's bound to
 //     the dext and what isn't (list-devices)
 //
-// Lives next to qemu-system-aarch64 inside VFIOUserHostApp.app and is
+// Lives next to the host-native QEMU binary inside VFIOUserHostApp.app and is
 // surfaced to the user via a wrapper at ~/.local/bin/qemu-vfio-apple.
 //
 // For the VM side: pulls a prebaked qcow2 image from a GHCR OCI artifact
@@ -42,16 +42,46 @@ import Foundation
 // MARK: - Constants
 
 let kVersion         = "1.0"
-let kDefaultImageRef = "ghcr.io/scottjg/qemu-vfio-apple-images:latest"
+let kDefaultArm64ImageRef = "ghcr.io/scottjg/qemu-vfio-apple-images:latest"
+let kDefaultX86_64ImageRef = "ghcr.io/scottjg/qemu-vfio-apple-images:latest-x86_64"
 let kDefaultCpus     = 8
 let kDefaultMemory   = "12G"
 let kDefaultSshPort  = 2222
+
+enum GuestArchitecture: String {
+    case arm64
+    case x86_64
+
+    var qemuTarget: String { self == .arm64 ? "aarch64" : "x86_64" }
+    var machine: String { self == .arm64 ? "virt,highmem=on" : "q35" }
+    var qemuBinary: String { "qemu-system-\(qemuTarget)" }
+    var efiCodeName: String {
+        self == .arm64 ? "edk2-aarch64-code.fd" : "edk2-x86_64-code.fd"
+    }
+    var efiVarsNames: [String] {
+        self == .arm64
+            ? ["edk2-arm-vars.fd", "edk2-aarch64-vars.fd"]
+            : ["edk2-i386-vars.fd", "edk2-x86_64-vars.fd"]
+    }
+    var efiStateName: String {
+        self == .arm64 ? "edk2-aarch64-vars.fd" : "edk2-x86_64-vars.fd"
+    }
+
+    static var hostDefault: GuestArchitecture {
+        #if arch(x86_64)
+        return .x86_64
+        #else
+        return .arm64
+        #endif
+    }
+}
 
 // MARK: - Args
 
 /// Result of parsing argv after the subcommand has been consumed.
 struct Options {
-    var imageRef:       String   = kDefaultImageRef
+    var architecture:   GuestArchitecture = .hostDefault
+    var imageRef:       String?  = nil
     var basePath:       String?  = nil    // local qcow2, skip download
     var overlayPath:    String?  = nil
     var cpus:           Int      = kDefaultCpus
@@ -62,7 +92,7 @@ struct Options {
     var noPassthrough:  Bool     = false  // force off, skip auto-detect
     var dryRun:         Bool     = false
 
-    /// Run qemu-system-aarch64 under `sudo`. The only reason to do this
+    /// Run the selected QEMU binary under `sudo`. The only reason to do this
     /// today is USB passthrough of devices macOS has already bound to a
     /// driver (HID, IOUSBHost, IOStorage, …): qemu's usb-host backend
     /// asks IOKit to detach the device, which requires either the
@@ -88,6 +118,12 @@ struct Options {
     /// default we derive it from the image reference's tag so distinct
     /// images get distinct overlays; users can override with --overlay.
     var vmName:         String   = ""
+
+    var resolvedImageRef: String {
+        imageRef ?? (architecture == .arm64
+            ? kDefaultArm64ImageRef
+            : kDefaultX86_64ImageRef)
+    }
 }
 
 /// Parsed `--disk PATH[:ro]`. The format field is left nil here and
@@ -139,6 +175,11 @@ func parseOptions(_ argv: [String]) -> Options {
 
         switch key {
         case "--image":          opts.imageRef = value(for: key)
+        case "--arch":
+            guard let arch = GuestArchitecture(rawValue: value(for: key)) else {
+                die("--arch must be arm64 or x86_64")
+            }
+            opts.architecture = arch
         case "--base":           opts.basePath = value(for: key)
         case "--overlay":        opts.overlayPath = value(for: key)
         case "--cpus":
@@ -171,7 +212,10 @@ func parseOptions(_ argv: [String]) -> Options {
     if let base = opts.basePath {
         opts.vmName = deriveVMName(fromLocalPath: base)
     } else {
-        opts.vmName = deriveVMName(from: opts.imageRef)
+        opts.vmName = deriveVMName(from: opts.resolvedImageRef)
+    }
+    if opts.architecture == .x86_64 {
+        opts.vmName += "-x86_64"
     }
     return opts
 }
@@ -275,7 +319,8 @@ func printUsage() {
 
         flags (run / pull / reset):
           --image REPO:TAG        OCI image to pull
-                                  (default: \(kDefaultImageRef))
+                                  (default selected by --arch / host architecture)
+          --arch arm64|x86_64    guest architecture (default: host architecture)
           --base PATH             use a local qcow2 as the base image and
                                   skip the download entirely. Handy when
                                   testing a locally-sealed image before
@@ -309,7 +354,7 @@ func printUsage() {
                                   virtio-blk-pci device. Format is
                                   auto-detected by qemu-img. Append ':ro'
                                   to mount it read-only. Repeatable.
-          --sudo                  run qemu-system-aarch64 under sudo so
+          --sudo                  run the selected QEMU binary under sudo so
                                   it can detach USB devices from macOS
                                   drivers (required for -device usb-host
                                   to grab anything macOS has already
@@ -331,7 +376,8 @@ func printUsage() {
           qemu-vfio-apple --headless --ssh-port 2200
           qemu-vfio-apple --disk ~/games.qcow2 --disk ~/data.img:ro
           qemu-vfio-apple --sudo -- -device usb-host,vendorid=0x046d,productid=0xc52b,bus=xhci.0
-          qemu-vfio-apple pull --image ghcr.io/scottjg/qemu-vfio-apple-images:ubuntu-desktop-resolute-arm64
+          qemu-vfio-apple --arch arm64
+          qemu-vfio-apple --arch x86_64 --image ghcr.io/scottjg/qemu-vfio-apple-images:ubuntu-desktop-resolute-x86_64
           qemu-vfio-apple --base ./out/ubuntu-desktop-image/artifacts/ubuntu-desktop-resolute-arm64.qcow2
           qemu-vfio-apple run -- -serial file:/tmp/console.log
           qemu-vfio-apple reset
@@ -359,6 +405,11 @@ func log(_ msg: String) {
 // MARK: - Command implementations
 
 func cmdRun(_ opts: Options) -> Int32 {
+    guard opts.architecture == GuestArchitecture.hostDefault else {
+        warn("HVF requires a guest architecture matching this host; use --arch \(GuestArchitecture.hostDefault.rawValue)")
+        return 2
+    }
+
     let base: URL
     if let local = opts.basePath {
         let url = URL(fileURLWithPath: local).standardizedFileURL
@@ -371,7 +422,7 @@ func cmdRun(_ opts: Options) -> Int32 {
     } else {
         let cache = ensureCacheLayout()
         do {
-            base = try downloadImageIfNeeded(ref: opts.imageRef, cache: cache)
+            base = try downloadImageIfNeeded(ref: opts.resolvedImageRef, cache: cache)
         } catch {
             warn("download failed: \(error.localizedDescription)")
             return 1
@@ -394,7 +445,7 @@ func cmdPull(_ opts: Options) -> Int32 {
     }
     let cache = ensureCacheLayout()
     do {
-        let path = try downloadImageIfNeeded(ref: opts.imageRef, cache: cache)
+        let path = try downloadImageIfNeeded(ref: opts.resolvedImageRef, cache: cache)
         print(path.path)
         return 0
     } catch {
@@ -405,7 +456,7 @@ func cmdPull(_ opts: Options) -> Int32 {
 
 func cmdReset(_ opts: Options) -> Int32 {
     let overlay = resolvedOverlayURL(opts)
-    let efiVars = efiVarsURL(for: opts.vmName)
+    let efiVars = efiVarsURL(for: opts.vmName, architecture: opts.architecture)
     let fm = FileManager.default
     var removed = false
     for url in [overlay, efiVars] {
@@ -463,14 +514,14 @@ func cmdPrune(_ opts: Options) -> Int32 {
 
     // 1. Keep whatever `--image` resolves to.
     do {
-        let ref = try ImageRef.parse(opts.imageRef)
+        let ref = try ImageRef.parse(opts.resolvedImageRef)
         let token = try getAnonymousToken(for: ref)
         let (digest, _) = try fetchLayerDigest(ref: ref, token: token)
         let digestHex = try hexOfSha256Digest(digest)
         let url = cachedImageURL(for: digestHex)
-        markKeep(url.lastPathComponent, reason: opts.imageRef)
+        markKeep(url.lastPathComponent, reason: opts.resolvedImageRef)
     } catch {
-        warn("could not resolve \(opts.imageRef): \(error.localizedDescription)")
+        warn("could not resolve \(opts.resolvedImageRef): \(error.localizedDescription)")
         warn("  (prune will not protect any tag on this run)")
     }
 
@@ -480,7 +531,7 @@ func cmdPrune(_ opts: Options) -> Int32 {
     //    app) we conservatively skip — that's the same behaviour as
     //    `ls` not finding the binary.
     let bundle: LauncherBundle?
-    do { bundle = try discoverLauncherBundle() }
+    do { bundle = try discoverLauncherBundle(architecture: opts.architecture) }
     catch {
         bundle = nil
         warn("cannot locate qemu-img (\(error.localizedDescription))")

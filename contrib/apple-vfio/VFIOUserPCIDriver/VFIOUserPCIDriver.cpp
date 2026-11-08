@@ -12,6 +12,7 @@
 #include <string.h>
 
 #include <DriverKit/OSMetaClass.h>
+#include <DriverKit/OSData.h>
 #include <DriverKit/IOBufferMemoryDescriptor.h>
 #include <DriverKit/IOMemoryMap.h>
 #include <DriverKit/IODMACommand.h>
@@ -24,6 +25,7 @@
 
 #include "VFIOUserPCIDriver.h"
 #include "VFIOUserPCIDriverUserClient.h"
+#include "../../apple-dma/apple-dma-protocol.h"
 
 enum {
     kVFIOUserPCIDriverUserClientMethodGetIdentity = 0,
@@ -64,7 +66,6 @@ enum {
 #define VFIO_USER_MAX_CLIENT_DMA_REGIONS 65536
 #define VFIO_USER_MAX_CLIENT_DMA_CHUNKS 64
 #define VFIO_USER_DMA_CHUNK_SIZE (1536ULL * 1024ULL * 1024ULL)
-#define VFIO_USER_MAX_DMA_SEGMENTS 32
 #define VFIO_USER_MAX_IRQ_VECTORS 256
 #define VFIO_USER_IRQ_PENDING_WORDS 4  /* 4 × 64 = 256 vectors */
 
@@ -81,19 +82,17 @@ struct VFIOUserClientDMARegion {
     uint64_t iova;
     uint64_t size;
     uint32_t chunkCount;
-    uint64_t firstBusAddress;
-    uint64_t firstBusLength;
     VFIOUserClientDMAChunk chunks[VFIO_USER_MAX_CLIENT_DMA_CHUNKS];
 };
 
 struct VFIOUserPCIDriver_IVars {
-    bool providerClaimed;
-    uint32_t providerClaimRefs;
     VFIOUserPCIDriverUserClient *openerClient;
+    bool claimBlocked;
 };
 
 struct VFIOUserPCIDriverUserClient_IVars {
     bool claimed;
+    IOMemoryDescriptor *barDescCache[6];
     IOBufferMemoryDescriptor *dmaBuffer;
     IODMACommand *dmaCommand;
     uint64_t dmaBufferSize;
@@ -111,6 +110,7 @@ struct VFIOUserPCIDriverUserClient_IVars {
 
     bool interruptsSetUp;
     uint32_t numInterrupts;
+    uint32_t pendingInterruptCancelCount;
     IOInterruptDispatchSource *interruptSources[VFIO_USER_MAX_IRQ_VECTORS];
     IODispatchQueue *irqQueue;
 
@@ -243,6 +243,7 @@ vfio_user_release_dma_region_chunks(VFIOUserPCIDriverUserClient *client,
                     client->ivars->activeDMAChunkCount,
                     vfio_user_dma_bytes_to_mb(client->ivars->activeDMABytes),
                     client->ivars->dmaCompleteFailureCount);
+                continue;
             }
 
             chunk->dmaCommand->release();
@@ -278,14 +279,6 @@ vfio_user_bar_type_string(uint8_t barType)
         return "unknown";
     }
 }
-
-/*
- * BAR memory descriptor cache.  Populated by the first (claimed) user client
- * when CopyClientMemoryForType is called for a BAR type.  Subsequent
- * (unclaimed) user clients reuse the cached descriptors so they can map BARs
- * via IOConnectMapMemory64 without needing their own IOPCIDevice Open().
- */
-static IOMemoryDescriptor *g_barDescCache[6] = {};
 
 static IOPCIDevice *
 vfio_user_get_pci_device(IOService *service)
@@ -337,20 +330,22 @@ vfio_user_service_claimed(VFIOUserPCIDriverUserClient *client)
 {
     VFIOUserPCIDriver *driverService;
 
-    if (client == nullptr) {
+    if (client == nullptr || client->ivars == nullptr ||
+        !client->ivars->claimed) {
         return false;
     }
 
     driverService = OSDynamicCast(VFIOUserPCIDriver, client->GetProvider());
     return driverService != nullptr &&
            driverService->ivars != nullptr &&
-           driverService->ivars->providerClaimed;
+           __atomic_load_n(&driverService->ivars->openerClient,
+                           __ATOMIC_ACQUIRE) == client;
 }
 
 static kern_return_t
-vfio_user_retain_shared_claim(VFIOUserPCIDriverUserClient *client,
-                              IOService *driverService,
-                              const VFIOUserPCIDeviceIdentity *identity)
+vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
+                       IOService *driverService,
+                       const VFIOUserPCIDeviceIdentity *identity)
 {
     VFIOUserPCIDriver *driver;
     IOPCIDevice *pciDevice;
@@ -366,7 +361,7 @@ vfio_user_retain_shared_claim(VFIOUserPCIDriverUserClient *client,
         return kIOReturnUnsupported;
     }
 
-    if (client->ivars->claimed) {
+    if (vfio_user_service_claimed(client)) {
         return kIOReturnSuccess;
     }
 
@@ -375,132 +370,105 @@ vfio_user_retain_shared_claim(VFIOUserPCIDriverUserClient *client,
         return kIOReturnUnsupported;
     }
 
-    if (!driver->ivars->providerClaimed) {
-        ret = pciDevice->Open(client, 0);
-        if (ret != kIOReturnSuccess) {
-            os_log(OS_LOG_DEFAULT,
-                   "vfio-user-dext: failed to open PCI device for %02x:%02x.%u: %#x",
-                   (unsigned int)identity->bus,
-                   (unsigned int)identity->device,
-                   (unsigned int)identity->function,
-                   ret);
-            return ret;
-        }
-
-        {
-            uint16_t cmd = 0;
-            uint16_t wanted;
-
-            pciDevice->ConfigurationRead16(0x04, &cmd);
-            os_log(OS_LOG_DEFAULT,
-                   "vfio-user-dext: PCI command register after Open: %#x", cmd);
-            wanted = cmd | 0x06; /* Memory Space Enable + Bus Master Enable */
-            if (wanted != cmd) {
-                pciDevice->ConfigurationWrite16(0x04, wanted);
-                pciDevice->ConfigurationRead16(0x04, &cmd);
-                os_log(OS_LOG_DEFAULT,
-                       "vfio-user-dext: PCI command register after enable: %#x", cmd);
-            }
-        }
-
-        driver->ivars->providerClaimed = true;
-        driver->ivars->openerClient = client;
-        os_log(OS_LOG_DEFAULT,
-               "vfio-user-dext: opened PCI device for %02x:%02x.%u (opener=primary client)",
-               (unsigned int)identity->bus,
-               (unsigned int)identity->device,
-               (unsigned int)identity->function);
-
-    } else {
-        os_log(OS_LOG_DEFAULT,
-               "vfio-user-dext: secondary claim for %02x:%02x.%u (device already open)",
-               (unsigned int)identity->bus,
-               (unsigned int)identity->device,
-               (unsigned int)identity->function);
+    VFIOUserPCIDriverUserClient *expected = nullptr;
+    if (!__atomic_compare_exchange_n(&driver->ivars->openerClient, &expected,
+                                     client, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE)) {
+        return kIOReturnExclusiveAccess;
+    }
+    if (__atomic_load_n(&driver->ivars->claimBlocked, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
+        vfio_user_dma_log("claim rejected after failed DMA cleanup");
+        return kIOReturnNotReady;
     }
 
-    driver->ivars->providerClaimRefs++;
+    ret = pciDevice->Open(client, 0);
+    if (ret != kIOReturnSuccess) {
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: failed to open PCI device for %02x:%02x.%u: %#x",
+               (unsigned int)identity->bus,
+               (unsigned int)identity->device,
+               (unsigned int)identity->function, ret);
+        __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
+        return ret;
+    }
+
+    {
+        uint16_t cmd = 0;
+        uint16_t wanted;
+
+        pciDevice->ConfigurationRead16(0x04, &cmd);
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: PCI command register after Open: %#x", cmd);
+        wanted = cmd | 0x06; /* Memory Space Enable + Bus Master Enable */
+        if (wanted != cmd) {
+            pciDevice->ConfigurationWrite16(0x04, wanted);
+            pciDevice->ConfigurationRead16(0x04, &cmd);
+            os_log(OS_LOG_DEFAULT,
+                   "vfio-user-dext: PCI command register after enable: %#x", cmd);
+        }
+    }
+
     client->ivars->claimed = true;
     os_log(OS_LOG_DEFAULT,
-           "vfio-user-dext: attached shared claim for %02x:%02x.%u refs=%u",
+           "vfio-user-dext: claimed PCI device %02x:%02x.%u",
            (unsigned int)identity->bus,
            (unsigned int)identity->device,
-           (unsigned int)identity->function,
-           (unsigned int)driver->ivars->providerClaimRefs);
+           (unsigned int)identity->function);
     return kIOReturnSuccess;
 }
 
-static void
-vfio_user_release_shared_claim(VFIOUserPCIDriverUserClient *client)
+static kern_return_t
+vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
 {
     IOService *driverService;
     VFIOUserPCIDriver *driver;
-    VFIOUserPCIDeviceIdentity identity;
-    bool haveIdentity;
-    bool isOpener;
 
-    if (client == nullptr || client->ivars == nullptr || !client->ivars->claimed) {
-        return;
+    if (client == nullptr || client->ivars == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    if (!client->ivars->claimed) {
+        return kIOReturnSuccess;
     }
 
-    client->ivars->claimed = false;
     driverService = client->GetProvider();
     driver = OSDynamicCast(VFIOUserPCIDriver, driverService);
     if (driver == nullptr || driver->ivars == nullptr) {
-        return;
+        return kIOReturnNotAttached;
     }
 
-    haveIdentity = driverService != nullptr &&
-                   vfio_user_read_identity(driverService, &identity) == kIOReturnSuccess;
-
-    if (driver->ivars->providerClaimRefs > 0) {
-        driver->ivars->providerClaimRefs--;
+    if (__atomic_load_n(&driver->ivars->openerClient, __ATOMIC_ACQUIRE) !=
+        client) {
+        vfio_user_dma_log("claim release rejected: client is not the owner");
+        return kIOReturnNotOpen;
     }
 
-    isOpener = (driver->ivars->openerClient == client);
-
-    if (isOpener && driver->ivars->providerClaimed) {
-        /*
-         * This client originally called Open() on the PCI device.
-         * Close it now while the client object is still alive — IOPCIFamily
-         * requires the Close entity to match the Open entity.
-         */
-        IOPCIDevice *pciDevice = vfio_user_get_pci_device(driverService);
-        if (pciDevice != nullptr) {
-            pciDevice->Close(client, 0);
-        }
-        driver->ivars->providerClaimed = false;
-        driver->ivars->openerClient = nullptr;
-
-        if (haveIdentity) {
-            os_log(OS_LOG_DEFAULT,
-                   "vfio-user-dext: primary client closed PCI device %02x:%02x.%u (remaining refs=%u)",
-                   (unsigned int)identity.bus,
-                   (unsigned int)identity.device,
-                   (unsigned int)identity.function,
-                   (unsigned int)driver->ivars->providerClaimRefs);
-        }
-    } else {
-        if (haveIdentity) {
-            os_log(OS_LOG_DEFAULT,
-                   "vfio-user-dext: secondary client detached from %02x:%02x.%u refs=%u",
-                   (unsigned int)identity.bus,
-                   (unsigned int)identity.device,
-                   (unsigned int)identity.function,
-                   (unsigned int)driver->ivars->providerClaimRefs);
-        }
+    IOPCIDevice *pciDevice = vfio_user_get_pci_device(driverService);
+    if (pciDevice == nullptr) {
+        vfio_user_dma_log("claim release: PCI provider is unavailable");
+        return kIOReturnNotAttached;
     }
+    pciDevice->Close(client, 0);
+    client->ivars->claimed = false;
+    __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
+    return kIOReturnSuccess;
 }
 
-static void
+static kern_return_t
 vfio_user_release_dma_buffer(VFIOUserPCIDriverUserClient *client)
 {
     if (client == nullptr || client->ivars == nullptr) {
-        return;
+        return kIOReturnBadArgument;
     }
 
     if (client->ivars->dmaCommand != nullptr) {
-        client->ivars->dmaCommand->CompleteDMA(kIODMACommandCompleteDMANoOptions);
+        kern_return_t ret = client->ivars->dmaCommand->CompleteDMA(
+            kIODMACommandCompleteDMANoOptions);
+        if (ret != kIOReturnSuccess) {
+            vfio_user_dma_log("DMA buffer CompleteDMA failed: %#x", ret);
+            return ret;
+        }
     }
 
     OSSafeReleaseNULL(client->ivars->dmaCommand);
@@ -510,6 +478,7 @@ vfio_user_release_dma_buffer(VFIOUserPCIDriverUserClient *client)
     client->ivars->dmaFlags = 0;
     client->ivars->dmaSegmentsCount = 0;
     memset(client->ivars->dmaSegments, 0, sizeof(client->ivars->dmaSegments));
+    return kIOReturnSuccess;
 }
 
 static kern_return_t
@@ -539,7 +508,10 @@ vfio_user_allocate_dma_buffer(VFIOUserPCIDriverUserClient *client,
         return kIOReturnUnsupported;
     }
 
-    vfio_user_release_dma_buffer(client);
+    kern_return_t releaseRet = vfio_user_release_dma_buffer(client);
+    if (releaseRet != kIOReturnSuccess) {
+        return releaseRet;
+    }
 
     uint64_t alignment = requestedAlignment;
     if (alignment == 0) {
@@ -618,9 +590,7 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
                                      uint64_t iova,
                                      uint64_t clientVA,
                                      uint64_t size,
-                                     uint32_t *outSegmentsCount,
-                                     IOAddressSegment *outSegments,
-                                     uint32_t maxSegments)
+                                     AppleDMAMapResult *outResult)
 {
     if (client == nullptr || client->ivars == nullptr) {
         vfio_user_dma_log("register: bad client iova=%#llx size=%llu",
@@ -634,7 +604,9 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
         return kIOReturnNotOpen;
     }
 
-    if (size == 0 || clientVA == 0) {
+    if (size == 0 || clientVA == 0 ||
+        size - 1 > UINT64_MAX - iova ||
+        size - 1 > UINT64_MAX - clientVA) {
         vfio_user_dma_log("register: bad args iova=%#llx va=%#llx size=%llu",
                           iova, clientVA, size);
         return kIOReturnBadArgument;
@@ -667,7 +639,7 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
             vfio_user_dma_log(
                 "register: duplicate iova=%#llx size=%llu existing_size=%llu",
                 iova, size, client->ivars->clientDMARegions[i].size);
-            return kIOReturnStillOpen;
+            return kIOReturnExclusiveAccess;
         }
         if (!client->ivars->clientDMARegions[i].valid && freeSlot < 0) {
             freeSlot = i;
@@ -681,20 +653,21 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
         return kIOReturnNoSpace;
     }
 
-    if (outSegmentsCount == nullptr || outSegments == nullptr || maxSegments == 0) {
+    if (outResult == nullptr) {
         vfio_user_dma_log("register: bad out params iova=%#llx size=%llu",
                           iova, size);
         return kIOReturnBadArgument;
     }
+    memset(outResult, 0, sizeof(*outResult));
+    outResult->mapping_id = iova;
 
     uint64_t chunkCountNeeded =
-        (size + VFIO_USER_DMA_CHUNK_SIZE - 1) / VFIO_USER_DMA_CHUNK_SIZE;
+        (size - 1) / VFIO_USER_DMA_CHUNK_SIZE + 1;
     if (chunkCountNeeded > VFIO_USER_MAX_CLIENT_DMA_CHUNKS) {
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: DMA region iova=%#llx size=%llu needs %llu chunks, max is %u",
                iova, size, chunkCountNeeded,
                (unsigned int)VFIO_USER_MAX_CLIENT_DMA_CHUNKS);
-        *outSegmentsCount = 0;
         return kIOReturnNoSpace;
     }
 
@@ -754,8 +727,9 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
         }
 
         uint64_t dmaFlags = 0;
-        uint32_t dmaSegmentsCount = VFIO_USER_MAX_DMA_SEGMENTS;
-        IOAddressSegment dmaSegments[VFIO_USER_MAX_DMA_SEGMENTS];
+        uint32_t dmaSegmentsCount = APPLE_DMA_MAX_SEGMENTS;
+        IOAddressSegment dmaSegments[APPLE_DMA_MAX_SEGMENTS];
+        uint64_t coveredLength = 0;
         memset(dmaSegments, 0, sizeof(dmaSegments));
         ret = dmaCmd->PrepareForDMA(kIODMACommandPrepareForDMANoOptions,
                                     memDesc,
@@ -786,73 +760,55 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
             goto rollback;
         }
 
-        /*
-         * For the dynamic DART-aware path, allow DriverKit to choose the bus
-         * address as long as the requested chunk resolves to one full-length
-         * DMA segment. Keep rejecting fragmented or otherwise partial mappings
-         * until the control protocol can return a richer segment list.
-         */
-        bool fullSingleSegment = dmaSegmentsCount == 1 &&
-                                 dmaSegments[0].length == chunkSize;
-        if (!fullSingleSegment) {
-            uint64_t coveredLength = 0;
-
-            for (uint32_t seg = 0; seg < dmaSegmentsCount; seg++) {
-                if (dmaSegments[seg].length == 0 ||
-                    coveredLength + dmaSegments[seg].length > chunkSize) {
-                    break;
-                }
-                coveredLength += dmaSegments[seg].length;
-            }
-
-            vfio_user_dma_log(
-                "rejecting DMA mapping iova=%#llx size=%llu segments=%u "
-                "first=%#llx/%#llx covered=%llu",
-                chunkIOVA, chunkSize, (unsigned int)dmaSegmentsCount,
-                dmaSegmentsCount > 0 ? dmaSegments[0].address : 0,
-                dmaSegmentsCount > 0 ? dmaSegments[0].length : 0,
-                coveredLength);
-            for (uint32_t seg = 0; seg < dmaSegmentsCount &&
-                                    seg < VFIO_USER_MAX_DMA_SEGMENTS; seg++) {
-                vfio_user_dma_log("DMA segment[%u] iova=%#llx actual=%#llx len=%#llx",
-                                  (unsigned int)seg,
-                                  chunkIOVA,
-                                  dmaSegments[seg].address,
-                                  dmaSegments[seg].length);
-            }
-            {
-                kern_return_t completeRet;
-
-                completeRet = dmaCmd->CompleteDMA(
-                    kIODMACommandCompleteDMANoOptions);
-                if (completeRet != kIOReturnSuccess) {
-                    client->ivars->dmaCompleteFailureCount++;
-                    vfio_user_dma_log(
-                        "CompleteDMA failed while rejecting DMA mapping "
-                        "iova=%#llx size=%llu kr=%#x complete_failures=%llu",
-                        chunkIOVA, chunkSize, completeRet,
-                        client->ivars->dmaCompleteFailureCount);
-                }
-            }
-            dmaCmd->release();
-            memDesc->release();
-            ret = kIOReturnNotAligned;
-            goto rollback;
-        }
-
         VFIOUserClientDMAChunk *chunk = &region->chunks[chunkCount];
         chunk->valid = true;
         chunk->iova = chunkIOVA;
         chunk->size = chunkSize;
         chunk->memoryDescriptor = memDesc;
         chunk->dmaCommand = dmaCmd;
+        chunkCount++;
 
-        if (chunkCount == 0) {
-            region->firstBusAddress = dmaSegments[0].address;
-            region->firstBusLength = dmaSegments[0].length;
+        if (dmaSegmentsCount == 0 ||
+            dmaSegmentsCount > APPLE_DMA_MAX_SEGMENTS) {
+            vfio_user_dma_log(
+                "PrepareForDMA returned invalid segment count=%u iova=%#llx",
+                (unsigned int)dmaSegmentsCount, chunkIOVA);
+            ret = kIOReturnBadArgument;
+            goto rollback;
         }
 
-        chunkCount++;
+        for (uint32_t seg = 0; seg < dmaSegmentsCount; seg++) {
+            uint64_t segLength = dmaSegments[seg].length;
+
+            if (segLength == 0 || segLength > chunkSize - coveredLength ||
+                segLength - 1 > UINT64_MAX - dmaSegments[seg].address ||
+                outResult->segment_count >= APPLE_DMA_MAX_SEGMENTS) {
+                vfio_user_dma_log(
+                    "invalid or excessive DMA segment iova=%#llx "
+                    "segment=%u length=%llu covered=%llu chunk=%llu",
+                    chunkIOVA, (unsigned int)seg, segLength, coveredLength,
+                    chunkSize);
+                ret = kIOReturnNoSpace;
+                goto rollback;
+            }
+
+            AppleDMASegment *resultSegment =
+                &outResult->segments[outResult->segment_count++];
+            resultSegment->address = dmaSegments[seg].address;
+            resultSegment->length = segLength;
+            resultSegment->offset = chunkOffset + coveredLength;
+            coveredLength += segLength;
+        }
+
+        if (coveredLength != chunkSize) {
+            vfio_user_dma_log(
+                "DMA segments do not cover requested chunk iova=%#llx "
+                "covered=%llu chunk=%llu",
+                chunkIOVA, coveredLength, chunkSize);
+            ret = kIOReturnNotAligned;
+            goto rollback;
+        }
+
         chunkOffset += chunkSize;
         remaining -= chunkSize;
     }
@@ -861,36 +817,19 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
     region->chunkCount = chunkCount;
     vfio_user_note_dma_region_added(client, size, chunkCount);
 
-    *outSegmentsCount = 1;
-    outSegments[0].address = region->firstBusAddress;
-    outSegments[0].length = region->firstBusLength;
-
+    outResult->status = 0;
     return kIOReturnSuccess;
 
 rollback:
-    *outSegmentsCount = 0;
-    for (uint32_t chunkIdx = 0; chunkIdx < chunkCount; chunkIdx++) {
-        VFIOUserClientDMAChunk *chunk = &region->chunks[chunkIdx];
-        if (chunk->dmaCommand != nullptr) {
-            kern_return_t completeRet;
-
-            completeRet = chunk->dmaCommand->CompleteDMA(
-                kIODMACommandCompleteDMANoOptions);
-            if (completeRet != kIOReturnSuccess) {
-                client->ivars->dmaCompleteFailureCount++;
-                vfio_user_dma_log(
-                    "CompleteDMA failed during register rollback "
-                    "region=%#llx chunk=%#llx size=%llu index=%u kr=%#x "
-                    "complete_failures=%llu",
-                    region->iova, chunk->iova, chunk->size,
-                    (unsigned int)chunkIdx, completeRet,
-                    client->ivars->dmaCompleteFailureCount);
-            }
-            chunk->dmaCommand->release();
-        }
-        if (chunk->memoryDescriptor != nullptr) {
-            chunk->memoryDescriptor->release();
-        }
+    memset(outResult, 0, sizeof(*outResult));
+    region->chunkCount = chunkCount;
+    if (vfio_user_release_dma_region_chunks(client, region) !=
+        kIOReturnSuccess) {
+        region->valid = true;
+        vfio_user_note_dma_region_added(client, size, chunkCount);
+        outResult->mapping_id = iova;
+        outResult->status = APPLE_DMA_MAP_STATUS_RETAINED;
+        return kIOReturnSuccess;
     }
     memset(region, 0, sizeof(*region));
     return ret;
@@ -919,6 +858,7 @@ vfio_user_unregister_client_dma_region(VFIOUserPCIDriverUserClient *client,
                 "iova=%#llx size=%llu chunks=%u first_error=%#x",
                 region->iova, region->size,
                 (unsigned int)region->chunkCount, releaseRet);
+            return releaseRet;
         }
 
         vfio_user_note_dma_region_removed(client, region->size,
@@ -953,6 +893,7 @@ vfio_user_release_all_client_dma_regions(VFIOUserPCIDriverUserClient *client)
                 "iova=%#llx size=%llu chunks=%u first_error=%#x",
                 region->iova, region->size,
                 (unsigned int)region->chunkCount, releaseRet);
+            continue;
         }
 
         vfio_user_note_dma_region_removed(client, region->size,
@@ -1044,10 +985,9 @@ vfio_user_probe_client_dma_region(VFIOUserPCIDriverUserClient *client,
 /*
  * Synthesize a PCI BAR register value from GetBARInfo() metadata.
  *
- * The raw config space BAR registers contain DART-assigned addresses whose low
- * bits do not carry reliable PCI type information.  GetBARInfo() returns the
- * original BAR metadata (type, size) from IOPCIFamily, which knows the true
- * BAR configuration.
+ * The raw config space BAR registers contain host-assigned addresses that
+ * must not be exposed as guest BAR addresses. GetBARInfo() returns the BAR
+ * metadata (type, size) from IOPCIFamily.
  *
  * The address portion is left as zero — QEMU derives BAR sizes from
  * get_region_info, not from BAR probing.
@@ -1099,7 +1039,7 @@ vfio_user_config_read(VFIOUserPCIDriverUserClient *client,
 
     /*
      * BAR registers (0x10-0x27): synthesize proper values from GetBARInfo()
-     * instead of returning DART-assigned addresses with bogus type bits.
+     * instead of returning host-assigned addresses as guest BAR values.
      */
     if (width == 4 && offset >= 0x10 && offset <= 0x24 &&
         (offset & 3) == 0) {
@@ -1355,21 +1295,12 @@ IMPL(VFIOUserPCIDriver, NewUserClient)
 kern_return_t
 IMPL(VFIOUserPCIDriver, Stop)
 {
-    for (int i = 0; i < 6; i++) {
-        if (g_barDescCache[i] != nullptr) {
-            g_barDescCache[i]->release();
-            g_barDescCache[i] = nullptr;
-        }
-    }
-
-    if (ivars != nullptr && ivars->providerClaimed) {
+    if (ivars != nullptr &&
+        __atomic_load_n(&ivars->openerClient, __ATOMIC_ACQUIRE) != nullptr) {
         os_log(OS_LOG_DEFAULT,
-               "vfio-user-dext: WARNING: provider still claimed in driver Stop "
-               "(opener=%p refs=%u) — this should not happen",
-               (void *)ivars->openerClient,
-               (unsigned int)ivars->providerClaimRefs);
-        ivars->providerClaimed = false;
-        ivars->openerClient = nullptr;
+               "vfio-user-dext: provider stop request rejected while PCI "
+               "device remains claimed; DriverKit may still force teardown");
+        return kIOReturnStillOpen;
     }
     IOSafeDeleteNULL(ivars, VFIOUserPCIDriver_IVars, 1);
     return Stop(provider, SUPERDISPATCH);
@@ -1397,7 +1328,8 @@ IMPL(VFIOUserPCIDriverUserClient, Start)
     return kIOReturnSuccess;
 }
 
-static void vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *);
+static kern_return_t
+vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *);
 
 kern_return_t
 IMPL(VFIOUserPCIDriverUserClient, Stop)
@@ -1417,39 +1349,99 @@ IMPL(VFIOUserPCIDriverUserClient, Stop)
             ivars->dmaCompleteFailureCount);
     }
 
-    vfio_user_release_all_interrupts(this);
+    kern_return_t irqRet = vfio_user_release_all_interrupts(this);
+    if (irqRet != kIOReturnSuccess) {
+        vfio_user_dma_log(
+            "client stop deferred while interrupt cancellation is pending "
+            "(kr=%#x); retaining client state", irqRet);
+        return kIOReturnStillOpen;
+    }
     vfio_user_release_all_client_dma_regions(this);
-    vfio_user_release_dma_buffer(this);
-    vfio_user_release_shared_claim(this);
+    kern_return_t dmaBufferRet = ivars != nullptr ?
+        vfio_user_release_dma_buffer(this) : kIOReturnSuccess;
+    if (ivars != nullptr &&
+        (ivars->activeDMARegionCount != 0 || dmaBufferRet != kIOReturnSuccess)) {
+        VFIOUserPCIDriver *driver = OSDynamicCast(VFIOUserPCIDriver, GetProvider());
+        if (driver != nullptr && driver->ivars != nullptr) {
+            __atomic_store_n(&driver->ivars->claimBlocked, true, __ATOMIC_RELEASE);
+            vfio_user_dma_log(
+                "client stop refused: active DMA mappings remain "
+                "(regions=%llu, buffer_complete=%#x); retaining claim and "
+                "DMA backing in this Stop call; DriverKit may still force teardown",
+                ivars->activeDMARegionCount, dmaBufferRet);
+        } else {
+            vfio_user_dma_log(
+                "client stop refused: active DMA mappings remain "
+                "(regions=%llu, buffer_complete=%#x); provider state "
+                "unavailable; DriverKit may still force teardown",
+                ivars->activeDMARegionCount, dmaBufferRet);
+        }
+        return kIOReturnStillOpen;
+    }
+    kern_return_t claimRet = vfio_user_release_claim(this);
+    if (claimRet != kIOReturnSuccess) {
+        VFIOUserPCIDriver *driver = OSDynamicCast(VFIOUserPCIDriver, GetProvider());
+        if (driver != nullptr && driver->ivars != nullptr) {
+            __atomic_store_n(&driver->ivars->claimBlocked, true, __ATOMIC_RELEASE);
+        }
+        vfio_user_dma_log(
+            "client stop refused: could not close PCI claim (kr=%#x); "
+            "retaining claim in this Stop call; DriverKit may still force teardown",
+            claimRet);
+        return kIOReturnStillOpen;
+    }
+    if (ivars != nullptr) {
+        for (int i = 0; i < 6; i++) {
+            OSSafeReleaseNULL(ivars->barDescCache[i]);
+        }
+    }
 
     IOSafeDeleteNULL(ivars, VFIOUserPCIDriverUserClient_IVars, 1);
     return Stop(provider, SUPERDISPATCH);
 }
 
-static void
+static kern_return_t
 vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *client)
 {
-    if (client == nullptr || client->ivars == nullptr) {
-        return;
+    if (client == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    if (client->ivars == nullptr) {
+        return kIOReturnSuccess;
     }
 
-    if (!client->ivars->interruptsSetUp) {
-        return;
+    if (__atomic_load_n(&client->ivars->pendingInterruptCancelCount,
+                        __ATOMIC_ACQUIRE) != 0) {
+        return kIOReturnStillOpen;
     }
 
+    __atomic_store_n(&client->ivars->interruptsSetUp, false,
+                     __ATOMIC_RELEASE);
     for (uint32_t i = 0; i < client->ivars->numInterrupts; i++) {
         IOInterruptDispatchSource *src = client->ivars->interruptSources[i];
         if (src != nullptr) {
             /*
              * Cancel is async — it schedules a completion block on src's
-             * dispatch queue.  Release inside the completion block so the
-             * source stays live until the cancel has fully drained.
+             * dispatch queue. Keep the client and ivars alive until the
+             * completion callback drains, then require Stop to be retried.
              */
+            client->retain();
+            __atomic_add_fetch(&client->ivars->pendingInterruptCancelCount, 1,
+                               __ATOMIC_ACQ_REL);
             src->Cancel(^{
+                __atomic_sub_fetch(
+                    &client->ivars->pendingInterruptCancelCount, 1,
+                    __ATOMIC_ACQ_REL);
                 src->release();
+                client->release();
             });
             client->ivars->interruptSources[i] = nullptr;
         }
+    }
+
+    if (__atomic_load_n(&client->ivars->pendingInterruptCancelCount,
+                        __ATOMIC_ACQUIRE) != 0) {
+        return kIOReturnStillOpen;
     }
 
     if (client->ivars->irqQueue != nullptr) {
@@ -1457,7 +1449,6 @@ vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *client)
         client->ivars->irqQueue = nullptr;
     }
 
-    client->ivars->interruptsSetUp = false;
     client->ivars->numInterrupts = 0;
 
     if (client->ivars->irqPending != nullptr) {
@@ -1477,6 +1468,7 @@ vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *client)
     OSSafeReleaseNULL(client->ivars->irqSharedBuffer);
 
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: released all interrupt sources");
+    return kIOReturnSuccess;
 }
 
 static uint32_t
@@ -1563,7 +1555,7 @@ vfio_user_setup_interrupts(VFIOUserPCIDriverUserClient *client)
         return kIOReturnNotOpen;
     }
 
-    if (client->ivars->interruptsSetUp) {
+    if (__atomic_load_n(&client->ivars->interruptsSetUp, __ATOMIC_ACQUIRE)) {
         return kIOReturnStillOpen;
     }
 
@@ -1710,14 +1702,23 @@ vfio_user_setup_interrupts(VFIOUserPCIDriverUserClient *client)
     }
 
     client->ivars->numInterrupts = registered;
-    client->ivars->interruptsSetUp = (registered > 0);
+    __atomic_store_n(&client->ivars->interruptsSetUp, registered > 0,
+                     __ATOMIC_RELEASE);
 
     os_log(OS_LOG_DEFAULT,
            "vfio-user-dext: registered %u/%u interrupt vectors (%{public}s)",
            (unsigned int)registered, (unsigned int)requested,
            usingMSIX ? "MSI-X" : "MSI");
 
-    return registered > 0 ? kIOReturnSuccess : kIOReturnNotFound;
+    if (registered > 0) {
+        return kIOReturnSuccess;
+    }
+
+    kern_return_t cleanupRet = vfio_user_release_all_interrupts(client);
+    if (cleanupRet != kIOReturnSuccess) {
+        return cleanupRet;
+    }
+    return ret != kIOReturnSuccess ? ret : kIOReturnNotFound;
 }
 
 kern_return_t
@@ -1746,6 +1747,12 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
         return ret;
     }
 
+    if (selector != kVFIOUserPCIDriverUserClientMethodGetIdentity &&
+        selector != kVFIOUserPCIDriverUserClientMethodClaim &&
+        !vfio_user_service_claimed(this)) {
+        return kIOReturnNotOpen;
+    }
+
     switch (selector) {
     case kVFIOUserPCIDriverUserClientMethodGetIdentity:
         if (arguments->scalarOutput == nullptr || arguments->scalarOutputCount < 6) {
@@ -1762,7 +1769,7 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
         return kIOReturnSuccess;
 
     case kVFIOUserPCIDriverUserClientMethodClaim: {
-        return vfio_user_retain_shared_claim(this, driverService, &identity);
+        return vfio_user_claim_device(this, driverService, &identity);
     }
 
     case kVFIOUserPCIDriverUserClientMethodTerminate:
@@ -1800,35 +1807,45 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     }
 
     case kVFIOUserPCIDriverUserClientMethodFreeDMABuffer:
-        vfio_user_release_dma_buffer(this);
-        return kIOReturnSuccess;
+        return vfio_user_release_dma_buffer(this);
 
     case kVFIOUserPCIDriverUserClientMethodRegisterDMARegion: {
         if (arguments->scalarInput == nullptr || arguments->scalarInputCount < 3) {
             return kIOReturnBadArgument;
         }
-        if (arguments->scalarOutput == nullptr || arguments->scalarOutputCount < 3) {
+        if (arguments->structureOutputDescriptor != nullptr ||
+            arguments->structureOutputMaximumSize < sizeof(AppleDMAMapResult)) {
             return kIOReturnBadArgument;
         }
 
-        IOAddressSegment busSegments[8];
-        uint32_t busSegmentsCount = 8;
-
-        ret = vfio_user_register_client_dma_region(this,
-                                                   arguments->scalarInput[0],
-                                                   arguments->scalarInput[1],
-                                                   arguments->scalarInput[2],
-                                                   &busSegmentsCount,
-                                                   busSegments,
-                                                   8);
-        if (ret != kIOReturnSuccess) {
-            return ret;
+        OSData *output = OSData::withCapacity(sizeof(AppleDMAMapResult));
+        if (output == nullptr) {
+            return kIOReturnNoMemory;
         }
 
-        arguments->scalarOutput[0] = busSegmentsCount;
-        arguments->scalarOutput[1] = busSegmentsCount > 0 ? busSegments[0].address : 0;
-        arguments->scalarOutput[2] = busSegmentsCount > 0 ? busSegments[0].length : 0;
-        arguments->scalarOutputCount = 3;
+        AppleDMAMapResult result = {};
+        ret = vfio_user_register_client_dma_region(
+            this, arguments->scalarInput[0], arguments->scalarInput[1],
+            arguments->scalarInput[2], &result);
+        if (ret != kIOReturnSuccess) {
+            vfio_user_dma_log("DMA registration rejected token=%#llx kr=%#x",
+                              arguments->scalarInput[0], ret);
+            memset(&result, 0, sizeof(result));
+            result.mapping_id = arguments->scalarInput[0];
+            result.status = APPLE_DMA_MAP_STATUS_ERROR;
+        }
+
+        if (!output->appendBytes(&result, sizeof(result))) {
+            output->release();
+            if (ret == kIOReturnSuccess &&
+                vfio_user_unregister_client_dma_region(
+                    this, arguments->scalarInput[0]) != kIOReturnSuccess) {
+                vfio_user_dma_log("failed to roll back DMA after output failure");
+                return kIOReturnStillOpen;
+            }
+            return kIOReturnNoMemory;
+        }
+        arguments->structureOutput = output;
         return kIOReturnSuccess;
     }
 
@@ -1982,7 +1999,8 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
             return kIOReturnBadArgument;
         }
 
-        if (ivars == nullptr || !ivars->interruptsSetUp) {
+        if (ivars == nullptr ||
+            !__atomic_load_n(&ivars->interruptsSetUp, __ATOMIC_ACQUIRE)) {
             return kIOReturnNotReady;
         }
 
@@ -2000,7 +2018,8 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
             return kIOReturnBadArgument;
         }
 
-        if (ivars == nullptr || !ivars->interruptsSetUp) {
+        if (ivars == nullptr ||
+            !__atomic_load_n(&ivars->interruptsSetUp, __ATOMIC_ACQUIRE)) {
             return kIOReturnNotReady;
         }
 
@@ -2043,7 +2062,8 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
             return kIOReturnBadArgument;
         }
 
-        if (ivars == nullptr || !ivars->interruptsSetUp) {
+        if (ivars == nullptr ||
+            !__atomic_load_n(&ivars->interruptsSetUp, __ATOMIC_ACQUIRE)) {
             return kIOReturnNotReady;
         }
 
@@ -2062,7 +2082,8 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
 void
 IMPL(VFIOUserPCIDriverUserClient, InterruptOccurred)
 {
-    if (ivars == nullptr || !ivars->interruptsSetUp) {
+    if (ivars == nullptr ||
+        !__atomic_load_n(&ivars->interruptsSetUp, __ATOMIC_ACQUIRE)) {
         return;
     }
 
@@ -2138,18 +2159,14 @@ IMPL(VFIOUserPCIDriverUserClient, CopyClientMemoryForType)
         uint8_t barIndex =
             (uint8_t)(type - kVFIOUserPCIDriverUserClientMemoryTypeBAR0);
 
-        /*
-         * Secondary (unclaimed) clients use the cached descriptor that was
-         * populated by the primary client's first mapping request.
-         */
-        if (!ivars->claimed && barIndex < 6 &&
-            g_barDescCache[barIndex] != nullptr) {
-            g_barDescCache[barIndex]->retain();
-            os_log(OS_LOG_DEFAULT,
-                   "vfio-user-dext: providing cached BAR%u descriptor for shared user client",
-                   (unsigned int)barIndex);
+        if (!vfio_user_service_claimed(this)) {
+            return kIOReturnNotOpen;
+        }
+
+        if (ivars->barDescCache[barIndex] != nullptr) {
+            ivars->barDescCache[barIndex]->retain();
             *options = 0;
-            *memory = g_barDescCache[barIndex];
+            *memory = ivars->barDescCache[barIndex];
             return kIOReturnSuccess;
         }
 
@@ -2157,7 +2174,6 @@ IMPL(VFIOUserPCIDriverUserClient, CopyClientMemoryForType)
         if (driverService == nullptr) {
             return kIOReturnNotAttached;
         }
-
         IOPCIDevice *pciDevice = vfio_user_get_pci_device(driverService);
         if (pciDevice == nullptr) {
             return kIOReturnUnsupported;
@@ -2178,31 +2194,21 @@ IMPL(VFIOUserPCIDriverUserClient, CopyClientMemoryForType)
         }
 
         IOMemoryDescriptor *barMemory = nullptr;
-        VFIOUserPCIDriver *driver = OSDynamicCast(VFIOUserPCIDriver, driverService);
-        IOService *opener = (IOService *)this;
-        if (driver != nullptr && driver->ivars != nullptr &&
-            driver->ivars->openerClient != nullptr) {
-            opener = (IOService *)driver->ivars->openerClient;
-        }
         ret = pciDevice->_CopyDeviceMemoryWithIndex(memoryIndex,
-                                                    &barMemory, opener);
+                                                    &barMemory, this);
         if (ret != kIOReturnSuccess || barMemory == nullptr) {
             os_log(OS_LOG_DEFAULT,
-                   "vfio-user-dext: _CopyDeviceMemoryWithIndex failed BAR%u idx=%u: %#x (opener=%s)",
-                   (unsigned int)barIndex, (unsigned int)memoryIndex, ret,
-                   (opener == (IOService *)this) ? "self" : "primary-client");
+                   "vfio-user-dext: _CopyDeviceMemoryWithIndex failed BAR%u idx=%u: %#x",
+                   (unsigned int)barIndex, (unsigned int)memoryIndex, ret);
             return ret != kIOReturnSuccess ? ret : kIOReturnNoMemory;
         }
 
-        if (barIndex < 6 && g_barDescCache[barIndex] == nullptr) {
-            barMemory->retain();
-            g_barDescCache[barIndex] = barMemory;
-        }
+        barMemory->retain();
+        ivars->barDescCache[barIndex] = barMemory;
 
         os_log(OS_LOG_DEFAULT,
-               "vfio-user-dext: providing BAR%u memory descriptor size=%llu for %s user client mapping",
-               (unsigned int)barIndex, barSize,
-               ivars->claimed ? "claimed" : "shared");
+               "vfio-user-dext: providing BAR%u memory descriptor size=%llu for claimed user client",
+               (unsigned int)barIndex, barSize);
 
         *options = 0;
         *memory = barMemory;

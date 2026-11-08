@@ -4,8 +4,8 @@
  *
  * Intercepts DMA map/unmap operations on the managed passthrough PCI
  * device and forwards them to the QEMU
- * apple-dma-pci device.  This lets the host macOS DriverKit dext program
- * the DART (DMA Address Remap Table) for device passthrough.
+ * apple-dma-pci device. This lets the host DriverKit extension establish
+ * device-visible DMA mappings for PCI passthrough.
  *
  * Transport protocol (must match hw/vfio/apple-dma.c):
  *   1. Driver maps BAR0, reads VERSION / MANAGED_BDF / MAX_ENTRIES.
@@ -27,25 +27,26 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+
+#include "apple-dma-protocol.h"
 #include <linux/version.h>
 
 #include <linux/hash.h>
 
 #include "apple_dma_trace.h"
+#ifdef CONFIG_ARM64
 #include "quirks/dczid_patch.h"
 #include "quirks/tso_patch.h"
 #include "quirks/uvm_page_patch.h"
+#endif
 
 /*
  * This module hooks per-device dma_map_ops, which requires the dma_ops field
- * in struct device.  That field only exists when CONFIG_ARCH_HAS_DMA_OPS is
- * enabled.  On arm64 this is selected by CONFIG_XEN; Debian/Ubuntu enable it,
- * Fedora does not.  There is no alternative hook point — the IOMMU API does
- * not allow the hook to control the returned IOVA, which the host DART
- * requires.
+ * in struct device. That field is only available when the target kernel
+ * enables CONFIG_ARCH_HAS_DMA_OPS.
  */
 #ifndef CONFIG_ARCH_HAS_DMA_OPS
-#error "apple_dma requires CONFIG_ARCH_HAS_DMA_OPS (enable CONFIG_XEN on arm64)"
+#error "apple_dma requires a kernel with CONFIG_ARCH_HAS_DMA_OPS enabled"
 #endif
 
 /*
@@ -84,7 +85,7 @@ MODULE_AUTHOR("QEMU apple-dma");
 #define REG_CMD_GPA_HI		0x14
 #define REG_DOORBELL		0x18
 
-#define APPLE_DMA_VERSION	2
+#define APPLE_DMA_VERSION	APPLE_DMA_PROTOCOL_VERSION
 
 /* Command types */
 #define CMD_MAP			1
@@ -112,13 +113,6 @@ struct apple_dma_map_req {
 	__le32 flags;
 } __packed;
 
-struct apple_dma_map_resp {
-	__le64 iova;
-	__le64 dma_addr;
-	__le32 dma_len;
-	__le32 status;
-} __packed;
-
 struct apple_dma_unmap_req {
 	__le64 iova;
 	__le64 size;
@@ -134,7 +128,11 @@ struct apple_dma_unmap_resp {
 
 static unsigned short managed_vendor = 0xffff;
 static unsigned short managed_device = 0xffff;
+#ifdef CONFIG_ARM64
 static bool enable_quirks = true;
+#else
+static bool enable_quirks;
+#endif
 
 module_param(managed_vendor, ushort, 0444);
 MODULE_PARM_DESC(managed_vendor,
@@ -145,11 +143,19 @@ MODULE_PARM_DESC(managed_device,
 module_param(enable_quirks, bool, 0444);
 MODULE_PARM_DESC(enable_quirks,
 		 "Enable vendor-specific workaround quirks (dczid and uvm page-size)");
-static unsigned int window_shift = 18;	/* 256K default, 0 = disabled */
+#ifdef CONFIG_ARM64
+static unsigned int window_shift = 18;	/* 256K default for arm64 */
+#else
+static unsigned int window_shift;	/* Exact mappings by default */
+#endif
 module_param(window_shift, uint, 0444);
 MODULE_PARM_DESC(window_shift,
-		 "Log2 of DMA window coalescing size (18=256K, 20=1M, 22=4M, 0=off)");
+		 "Log2 of DMA window coalescing size (0=off; x86 defaults to off)");
+#ifdef CONFIG_ARM64
 static bool enable_tso = true;
+#else
+static bool enable_tso;
+#endif
 module_param(enable_tso, bool, 0444);
 MODULE_PARM_DESC(enable_tso,
 		 "Enable Apple TSO mode on every online CPU at module load "
@@ -164,7 +170,7 @@ MODULE_PARM_DESC(enable_tso,
  *
  *   - Windowed: base_gpa is wnd_mask-aligned and size == wnd_size.  Many
  *     small guest mappings that fall inside the window all share this one
- *     DART entry.  This is the common case and is what gives us the huge
+ *     host mapping. This is the common case and is what gives us the huge
  *     entry-count reduction.
  *
  *   - Direct: base_gpa and size are exactly what the guest asked for.
@@ -193,6 +199,17 @@ struct apple_dma_map_entry {
 	struct dma_window *window; /* owning bus-address reservation */
 };
 
+struct apple_dma_sg_mapping {
+	struct list_head node;
+	struct scatterlist *sg;
+	int nents;
+	int orig_mapped;
+	dma_addr_t *mapped_dma_addrs;
+	dma_addr_t *orig_dma_addrs;
+	unsigned int *orig_dma_lens;
+	size_t *sizes;
+};
+
 #define DMA_WINDOW_HT_BITS	12
 #define DMA_WINDOW_HT_SIZE	(1 << DMA_WINDOW_HT_BITS)
 
@@ -204,6 +221,7 @@ struct apple_dma_dev {
 	struct mutex batch_lock;
 	spinlock_t maps_lock;
 	struct list_head maps;
+	struct list_head sg_maps;
 	struct pci_dev *managed_pdev;
 	const struct dma_map_ops *orig_dma_ops;
 	u16 managed_bdf;
@@ -223,20 +241,24 @@ struct apple_dma_dev {
 	 * Protected by batch_lock.
 	 */
 	struct apple_dma_map_req map_req;
-	struct apple_dma_map_resp map_resp;
+	AppleDMAMapResult map_resp;
 	struct apple_dma_unmap_req unmap_req;
 	struct apple_dma_unmap_resp unmap_resp;
 
+#ifdef CONFIG_ARM64
 	bool dczid_patched;
 	bool uvm_page_patched;
+#endif
 };
 
 static LIST_HEAD(apple_dma_instances);
 static DEFINE_MUTEX(instances_lock);
 
+#ifdef CONFIG_ARM64
 /* Global quirk reference counts — quirks are applied once system-wide */
 static int dczid_refcount;
 static int uvm_page_refcount;
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Window coalescing globals (computed from window_shift at init)       */
@@ -380,7 +402,7 @@ static u32 apple_dma_ring(struct apple_dma_dev *ad)
 	iowrite32(1, ad->bar + REG_DOORBELL);
 	/* Ensure we see response writes from the device */
 	rmb();
-	return le32_to_cpu(ad->cmd_page->status);
+	return ioread32(ad->bar + REG_STATUS);
 }
 
 static void apple_dma_prepare_cmd(struct apple_dma_dev *ad, u32 type,
@@ -394,6 +416,18 @@ static void apple_dma_prepare_cmd(struct apple_dma_dev *ad, u32 type,
 	ad->cmd_page->resp_gpa = cpu_to_le64(virt_to_phys(resp));
 }
 
+static int apple_dma_device_unmap(struct apple_dma_dev *ad,
+				  u64 iova, u64 size);
+
+static int apple_dma_reject_mapping(struct apple_dma_dev *ad, u64 iova,
+				    u64 size, int error)
+{
+	if (apple_dma_device_unmap(ad, iova, size))
+		apple_dma_panic_state(&ad->pdev->dev,
+				      "invalid map result could not be unmapped");
+	return error;
+}
+
 /*
  * Map a single region through the device.  Caller must hold ad->batch_lock.
  * On success, fills *out_iova, *out_dma, *out_len and returns 0.
@@ -404,7 +438,11 @@ static int apple_dma_device_map(struct apple_dma_dev *ad,
 				u32 *out_len)
 {
 	struct apple_dma_map_req *req = &ad->map_req;
-	struct apple_dma_map_resp *resp = &ad->map_resp;
+	AppleDMAMapResult *resp = &ad->map_resp;
+	dma_addr_t first_dma = 0;
+	u64 covered = 0;
+	u32 nsegments;
+	u32 i;
 	u32 status;
 
 	req->gpa = cpu_to_le64(gpa);
@@ -418,10 +456,52 @@ static int apple_dma_device_map(struct apple_dma_dev *ad,
 	if (status == S_INVAL)
 		return -EINVAL;
 
-	*out_iova = le64_to_cpu(resp->iova);
-	*out_dma  = (dma_addr_t)le64_to_cpu(resp->dma_addr);
-	*out_len  = le32_to_cpu(resp->dma_len);
-	return le32_to_cpu(resp->status) == S_OK ? 0 : -EIO;
+	if (le32_to_cpu(resp->status) == APPLE_DMA_MAP_STATUS_RETAINED) {
+		if (le64_to_cpu(resp->mapping_id) != gpa)
+			apple_dma_panic_state(&ad->pdev->dev,
+					      "retained mapping has invalid token");
+		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
+	}
+	if (le32_to_cpu(resp->status) == APPLE_DMA_MAP_STATUS_ERROR)
+		return -EIO;
+	if (le32_to_cpu(resp->status) != APPLE_DMA_MAP_STATUS_OK)
+		apple_dma_panic_state(&ad->pdev->dev,
+				      "unknown DMA map status; mapping may be live");
+	if (status != S_OK)
+		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
+
+	nsegments = le32_to_cpu(resp->segment_count);
+	if (!nsegments || nsegments > APPLE_DMA_MAX_SEGMENTS)
+		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
+
+	*out_iova = le64_to_cpu(resp->mapping_id);
+	if (*out_iova != gpa)
+		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
+
+	for (i = 0; i < nsegments; i++) {
+		u64 address = le64_to_cpu(resp->segments[i].address);
+		u64 length = le64_to_cpu(resp->segments[i].length);
+		u64 offset = le64_to_cpu(resp->segments[i].offset);
+
+		if (!length || offset != covered || covered > size ||
+		    length > size - covered ||
+		    address > (u64)(dma_addr_t)~0 ||
+		    length - 1 > (u64)(dma_addr_t)~0 - address)
+			return apple_dma_reject_mapping(ad, *out_iova, size, -EIO);
+		if (!i)
+			first_dma = (dma_addr_t)address;
+		else if (covered > (u64)~0ULL - first_dma ||
+			 address != first_dma + covered)
+			return apple_dma_reject_mapping(ad, *out_iova, size, -ERANGE);
+		covered += length;
+	}
+
+	if (covered != size)
+		return apple_dma_reject_mapping(ad, *out_iova, size, -EIO);
+
+	*out_dma = first_dma;
+	*out_len = size;
+	return 0;
 }
 
 /*
@@ -441,10 +521,11 @@ static int apple_dma_device_unmap(struct apple_dma_dev *ad,
 	apple_dma_prepare_cmd(ad, CMD_UNMAP, req, resp);
 	status = apple_dma_ring(ad);
 
-	if (status == S_INVAL)
-		return -EINVAL;
+	if (status != S_OK)
+		return -EIO;
 
-	return le32_to_cpu(resp->status) == S_OK ? 0 : -EIO;
+	return le32_to_cpu(resp->status) == S_OK &&
+	       le64_to_cpu(resp->iova) == iova ? 0 : -EIO;
 }
 
 /* ------------------------------------------------------------------ */
@@ -474,10 +555,10 @@ static struct dma_window *wnd_lookup(struct apple_dma_dev *ad,
  * on failure.
  *
  * The bookkeeping struct is allocated *before* we ask the host to register
- * the DART entry.  Doing it the other way round is dangerous: if the host
+ * the host mapping. Doing it the other way round is dangerous: if the host
  * registration succeeds but a subsequent kmalloc fails, we have to remember
  * to call apple_dma_device_unmap() to undo the host side effect, and a
- * single missing rollback there leaves a stale persistent DART entry into
+ * single missing rollback there leaves a stale persistent DMA mapping into
  * guest pages that the kernel has since recycled — i.e. a long-lived
  * silent DMA scribble.  Allocate-first eliminates that whole class of bug.
  */
@@ -501,7 +582,9 @@ static struct dma_window *wnd_create(struct apple_dma_dev *ad,
 		return ERR_PTR(ret);
 	}
 	if (dma_len < size) {
-		apple_dma_device_unmap(ad, iova, size);
+		if (apple_dma_device_unmap(ad, iova, size))
+			apple_dma_panic_state(&ad->pdev->dev,
+					      "incomplete mapping rollback failed");
 		kfree(w);
 		return ERR_PTR(-EIO);
 	}
@@ -524,7 +607,7 @@ static struct dma_window *wnd_create(struct apple_dma_dev *ad,
  * Caller must hold ad->batch_lock and must guarantee w->refcount > 0
  * on entry. Calling this on a window with refcount == 0 underflows
  * the unsigned counter and silently leaks both the struct and the
- * host DART entry, which then becomes a hidden persistent DMA
+ * host mapping, which then becomes a hidden persistent DMA
  * mapping into freed guest pages — an extremely effective way to
  * scribble random kernel memory long after the original mapping was
  * "torn down". The WARN_ON catches the regression noisily.
@@ -537,7 +620,10 @@ static bool wnd_put(struct apple_dma_dev *ad, struct dma_window *w)
 	if (--w->refcount > 0)
 		return false;
 
-	apple_dma_device_unmap(ad, w->iova, w->size);
+	if (apple_dma_device_unmap(ad, w->iova, w->size)) {
+		w->refcount = 1;
+		apple_dma_panic_state(&ad->pdev->dev, "host DMA unmap failed");
+	}
 	hlist_del(&w->hnode);
 	ad->window_count--;
 	kfree(w);
@@ -552,7 +638,7 @@ static bool wnd_put(struct apple_dma_dev *ad, struct dma_window *w)
  * Allocate a tracking entry up front, before any host-visible side effects.
  * The map fast path uses this as the first step so that a kmalloc failure
  * here returns -ENOMEM cleanly without ever touching the window hash table
- * or the host DART. Returns NULL on allocation failure.
+ * or the host mapping. Returns NULL on allocation failure.
  *
  * Caller must subsequently either:
  *   - publish via apple_dma_publish_entry() once a window is in hand, or
@@ -614,15 +700,18 @@ apple_dma_take(struct apple_dma_dev *ad, dma_addr_t mapped_dma, size_t size)
 static void apple_dma_free_all(struct apple_dma_dev *ad)
 {
 	struct apple_dma_map_entry *e, *tmp;
+	struct apple_dma_sg_mapping *sg_map, *sg_tmp;
 	struct dma_window *w;
 	struct hlist_node *htmp;
 	LIST_HEAD(stale);
+	LIST_HEAD(stale_sg_maps);
 	unsigned long flags;
 	unsigned int released = 0;
 	int i;
 
 	spin_lock_irqsave(&ad->maps_lock, flags);
 	list_splice_init(&ad->maps, &stale);
+	list_splice_init(&ad->sg_maps, &stale_sg_maps);
 	spin_unlock_irqrestore(&ad->maps_lock, flags);
 
 	list_for_each_entry_safe(e, tmp, &stale, node) {
@@ -630,11 +719,20 @@ static void apple_dma_free_all(struct apple_dma_dev *ad)
 		kfree(e);
 	}
 
+	list_for_each_entry_safe(sg_map, sg_tmp, &stale_sg_maps, node) {
+		list_del(&sg_map->node);
+		kfree(sg_map->mapped_dma_addrs);
+		kfree(sg_map->orig_dma_addrs);
+		kfree(sg_map->orig_dma_lens);
+		kfree(sg_map->sizes);
+		kfree(sg_map);
+	}
+
 	/*
 	 * Tear down any remaining windows.  It is critical that we call
 	 * apple_dma_device_unmap() on each one: the host (dext) enforces a
 	 * "iova is unique" invariant and will reject duplicate registers
-	 * with kIOReturnStillOpen.  If we skip the unmap here, stale DART
+	 * with kIOReturnStillOpen. If we skip the unmap here, stale host
 	 * entries persist on the host across a module unload/rebind and the
 	 * next load will hit "duplicate iova" failures for any GPA that
 	 * happens to coincide with a previously-mapped one.
@@ -649,8 +747,11 @@ static void apple_dma_free_all(struct apple_dma_dev *ad)
 			 * apple_dma_remove() just to gate new map ops via the
 			 * DMA hooks; the command ring itself is still live.
 			 */
-			if (ad->bar)
-				apple_dma_device_unmap(ad, w->iova, w->size);
+			if (!ad->bar ||
+			    apple_dma_device_unmap(ad, w->iova, w->size)) {
+				apple_dma_panic_state(&ad->pdev->dev,
+						      "teardown DMA unmap failed");
+			}
 			hlist_del(&w->hnode);
 			ad->window_count--;
 			kfree(w);
@@ -661,13 +762,13 @@ static void apple_dma_free_all(struct apple_dma_dev *ad)
 
 	if (released)
 		dev_info(&ad->pdev->dev,
-			 "apple_dma: released %u host DART entries on teardown\n",
+			 "apple_dma: released %u host DMA mappings on teardown\n",
 			 released);
 }
 
 
 /*
- * Look up the original DMA address for a DART-mapped address.
+ * Look up the original DMA address for a device-mapped address.
  * Used by sync ops to pass through to the original DMA subsystem.
  * Returns mapped_dma unchanged if no tracking entry is found.
  */
@@ -697,7 +798,7 @@ static dma_addr_t apple_dma_orig_addr(struct apple_dma_dev *ad,
  * Pick the window shape for @gpa / @size:
  *   - If windowing is enabled and the mapping fits entirely inside one
  *     wnd_size-aligned window, use (gpa & wnd_mask, wnd_size).  Other
- *     mappings that land in the same window will share this one DART
+ *     mappings that land in the same window will share this host
  *     reservation.
  *   - Otherwise, use an exact (gpa, size) window.  Duplicates are still
  *     refcounted but nothing else can share it.
@@ -734,11 +835,12 @@ static void wnd_shape_for(phys_addr_t gpa, size_t size,
  * wnd_put the window if we created it, no-op for a hash hit).  The
  * irreversible publish only happens once everything that can fail has
  * succeeded.  This means the map path has no half-built error state
- * that could leak a host DART entry behind a freed guest page if a
+ * that could leak a host DMA mapping behind a freed guest page if a
  * late kmalloc fails — the historical shape of this function had
  * exactly that bug.
  */
-static int apple_dma_map_locked(struct apple_dma_dev *ad, phys_addr_t gpa,
+static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
+				phys_addr_t gpa,
 				size_t size, dma_addr_t orig_dma,
 				dma_addr_t *out_dma)
 {
@@ -748,11 +850,18 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, phys_addr_t gpa,
 	struct apple_dma_map_entry *e;
 	dma_addr_t dma_addr;
 
+	if (!size || size > U32_MAX || gpa > (phys_addr_t)-1 - (size - 1))
+		return -E2BIG;
+
 	e = apple_dma_alloc_entry();
 	if (!e)
 		return -ENOMEM;
 
 	wnd_shape_for(gpa, size, &base, &wsize);
+	if (wsize > U32_MAX) {
+		kfree(e);
+		return -E2BIG;
+	}
 
 	w = wnd_lookup(ad, base, wsize);
 	if (!w) {
@@ -765,6 +874,12 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, phys_addr_t gpa,
 
 	dma_addr = w->dma_addr + (gpa - base);
 	w->refcount++;
+	if (dma_addr == DMA_MAPPING_ERROR || dma_addr > dma_get_mask(dev) ||
+	    size - 1 > dma_get_mask(dev) - dma_addr) {
+		wnd_put(ad, w);
+		kfree(e);
+		return -ERANGE;
+	}
 
 	apple_dma_publish_entry(ad, e, dma_addr, orig_dma, size, w);
 
@@ -781,8 +896,14 @@ static int apple_dma_map_one(struct apple_dma_dev *ad, struct device *dev,
 	if (!apple_dma_usable(ad))
 		apple_dma_panic_state(dev, "map requested in unusable context");
 
+	if (orig_dma != gpa) {
+		dev_warn(dev, "apple_dma: original DMA mapping is not identity; "
+			 "bounce buffers and guest IOMMUs are unsupported\n");
+		return -EOPNOTSUPP;
+	}
+
 	mutex_lock(&ad->batch_lock);
-	ret = apple_dma_map_locked(ad, gpa, size, orig_dma, out_dma);
+	ret = apple_dma_map_locked(ad, dev, gpa, size, orig_dma, out_dma);
 	mutex_unlock(&ad->batch_lock);
 
 	if (ret) {
@@ -987,98 +1108,198 @@ static int apple_dma_map_sg(struct device *dev, struct scatterlist *sg,
 {
 	struct apple_dma_dev *ad = apple_dma_find_by_dev(dev);
 	struct scatterlist *s;
-	dma_addr_t *dma_addrs = NULL;
+	struct apple_dma_sg_mapping *sg_map;
 	unsigned int count;
-	int mapped, i, err_idx = -1;
+	unsigned long flags;
+	int mapped, i, err_idx = -1, error = -EIO;
 
 	count = apple_dma_trace_stat_inc(APPLE_DMA_STAT_MAP_SG);
 	if (apple_dma_trace_should_log(count))
 		dev_info(dev, "apple_dma: map_sg #%u nents=%d\n",
 			 count, nents);
 
-	if (!ad || !ad->orig_dma_ops)
-		mapped = APPLE_DMA_CALL_ORIG_RET(ad, dev,
-						 dma_map_sg_attrs(dev, sg,
-								  nents, dir,
-								  attrs));
-	else if (ad->orig_dma_ops->map_sg)
-		mapped = ad->orig_dma_ops->map_sg(dev, sg, nents, dir, attrs);
-	else
+	if (!ad || !ad->orig_dma_ops) {
+		dev_warn(dev, "apple_dma: direct DMA backend cannot be safely wrapped\n");
 		return -EIO;
-
-	if (mapped <= 0)
-		return mapped;
+	}
 
 	if (!apple_dma_usable(ad))
 		apple_dma_panic_state(dev, "map_sg in unusable context");
 
-	dma_addrs = kcalloc(mapped, sizeof(*dma_addrs), GFP_KERNEL);
-	if (!dma_addrs)
-		apple_dma_panic_state(dev, "map_sg: alloc failed");
+	if (!ad->orig_dma_ops->map_sg)
+		return -EIO;
+
+	sg_map = kzalloc(sizeof(*sg_map), GFP_KERNEL);
+	if (!sg_map)
+		return -ENOMEM;
+	sg_map->sg = sg;
+	sg_map->nents = nents;
+	sg_map->mapped_dma_addrs =
+		kcalloc(nents, sizeof(*sg_map->mapped_dma_addrs), GFP_KERNEL);
+	sg_map->orig_dma_addrs =
+		kcalloc(nents, sizeof(*sg_map->orig_dma_addrs), GFP_KERNEL);
+	sg_map->orig_dma_lens =
+		kcalloc(nents, sizeof(*sg_map->orig_dma_lens), GFP_KERNEL);
+	sg_map->sizes = kcalloc(nents, sizeof(*sg_map->sizes), GFP_KERNEL);
+	if (!sg_map->mapped_dma_addrs || !sg_map->orig_dma_addrs ||
+	    !sg_map->orig_dma_lens || !sg_map->sizes) {
+		kfree(sg_map->mapped_dma_addrs);
+		kfree(sg_map->orig_dma_addrs);
+		kfree(sg_map->orig_dma_lens);
+		kfree(sg_map->sizes);
+		kfree(sg_map);
+		return -ENOMEM;
+	}
+
+	spin_lock_irqsave(&ad->maps_lock, flags);
+	if (!list_empty(&ad->sg_maps)) {
+		struct apple_dma_sg_mapping *existing;
+
+		list_for_each_entry(existing, &ad->sg_maps, node) {
+			if (existing->sg == sg) {
+				spin_unlock_irqrestore(&ad->maps_lock, flags);
+				dev_warn(dev, "apple_dma: duplicate map_sg scatterlist\n");
+				goto err_free_sg_map;
+			}
+		}
+	}
+	list_add_tail(&sg_map->node, &ad->sg_maps);
+	spin_unlock_irqrestore(&ad->maps_lock, flags);
+
+	for_each_sg(sg, s, nents, i)
+		sg_map->sizes[i] = s->length;
+
+	mapped = ad->orig_dma_ops->map_sg(dev, sg, nents, dir, attrs);
+	if (mapped <= 0) {
+		if (mapped < 0)
+			dev_warn(dev, "apple_dma: underlying map_sg returned %d\n",
+				 mapped);
+		if (mapped == -ENOMEM || mapped == -EINVAL ||
+		    mapped == -EREMOTEIO)
+			error = mapped;
+		goto err_remove_sg_map;
+	}
+	if (mapped > nents) {
+		if (ad->orig_dma_ops->unmap_sg)
+			ad->orig_dma_ops->unmap_sg(dev, sg, nents, dir, attrs);
+		else
+			APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+						 dma_unmap_sg_attrs(dev, sg, nents,
+								    dir, attrs));
+		goto err_remove_sg_map;
+	}
+	sg_map->orig_mapped = mapped;
+
+	for_each_sg(sg, s, nents, i) {
+		sg_map->orig_dma_addrs[i] = sg_dma_address(s);
+		sg_map->orig_dma_lens[i] = sg_dma_len(s);
+	}
+
+	/*
+	 * Mapping the original pages is unsafe if the guest DMA backend used
+	 * bounce buffers, an IOMMU, or merged physically discontiguous entries.
+	 */
+	if (mapped != nents) {
+		dev_warn(dev, "apple_dma: coalesced guest SG mappings unsupported\n");
+		goto err_unmap_orig;
+	}
+	for_each_sg(sg, s, nents, i) {
+		if (!sg_map->sizes[i] ||
+		    sg_map->sizes[i] > dma_get_max_seg_size(dev) ||
+		    sg_map->orig_dma_addrs[i] != sg_phys(s) ||
+		    sg_map->orig_dma_lens[i] != sg_map->sizes[i]) {
+			dev_warn(dev, "apple_dma: non-identity guest SG mapping unsupported\n");
+			goto err_unmap_orig;
+		}
+	}
 
 	mutex_lock(&ad->batch_lock);
 
-	for_each_sg(sg, s, mapped, i) {
+	for_each_sg(sg, s, nents, i) {
 		phys_addr_t gpa = sg_phys(s);
-		size_t size = sg_dma_len(s);
+		size_t size = sg_map->sizes[i];
 		dma_addr_t out_dma;
 		int ret;
 
-		ret = apple_dma_map_locked(ad, gpa, size, sg_dma_address(s),
-					   &out_dma);
+		ret = apple_dma_map_locked(ad, dev, gpa, size,
+					   sg_map->orig_dma_addrs[i], &out_dma);
 		if (ret) {
 			dev_warn(dev,
 				 "apple_dma: map_sg entry %d/%d failed"
 				 " gpa=%pap size=%zu ret=%d"
 				 " (active: %u maps, %llu bytes)\n",
-				 i, mapped, &gpa, size, ret,
+				 i, nents, &gpa, size, ret,
 				 atomic_read(&ad->map_count),
 				 (u64)atomic64_read(&ad->map_bytes));
 			err_idx = i;
+			if (ret == -ENOMEM)
+				error = ret;
 			break;
 		}
-		dma_addrs[i] = out_dma;
+		sg_map->mapped_dma_addrs[i] = out_dma;
+		if ((out_dma & ~(dma_addr_t)dma_get_seg_boundary(dev)) !=
+		    ((out_dma + size - 1) &
+		     ~(dma_addr_t)dma_get_seg_boundary(dev))) {
+			dev_warn(dev, "apple_dma: mapped SG segment crosses device boundary\n");
+			err_idx = i + 1;
+			break;
+		}
 		apple_dma_trace_record(ad, APPLE_DMA_TRACE_OP_MAP_SG, gpa, size);
 	}
 
 	mutex_unlock(&ad->batch_lock);
 
 	if (err_idx >= 0) {
-		/* Roll back entries 0..err_idx-1 */
+		/* Roll back host mappings created for this scatterlist. */
 		int j;
 
 		for_each_sg(sg, s, err_idx, j) {
 			struct apple_dma_map_entry *e;
 
-			e = apple_dma_take(ad, dma_addrs[j],
-					   sg_dma_len(s));
-			if (e) {
-				mutex_lock(&ad->batch_lock);
-				apple_dma_release_entry(ad, dev, e);
-				mutex_unlock(&ad->batch_lock);
-				kfree(e);
-			}
+			e = apple_dma_take(ad, sg_map->mapped_dma_addrs[j],
+					   sg_map->sizes[j]);
+			if (!e)
+				apple_dma_panic_state(dev,
+						      "map_sg rollback: missing mapping");
+			mutex_lock(&ad->batch_lock);
+			apple_dma_release_entry(ad, dev, e);
+			mutex_unlock(&ad->batch_lock);
+			kfree(e);
 		}
 
-		if (!ad || !ad->orig_dma_ops)
-			APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-						 dma_unmap_sg_attrs(dev, sg,
-								    mapped,
-								    dir,
-								    attrs));
-		else if (ad->orig_dma_ops->unmap_sg)
-			ad->orig_dma_ops->unmap_sg(dev, sg, mapped, dir, attrs);
-		kfree(dma_addrs);
-		return 0;
+		for_each_sg(sg, s, nents, j) {
+			sg_dma_address(s) = sg_map->orig_dma_addrs[j];
+			sg_dma_len(s) = sg_map->orig_dma_lens[j];
+		}
+		goto err_unmap_orig;
 	}
 
-	/* Replace DMA addresses with the device-mapped ones */
-	for_each_sg(sg, s, mapped, i) {
-		sg_dma_address(s) = dma_addrs[i];
+	/* Preserve each physical input range; don't reuse coalesced DMA lengths. */
+	for_each_sg(sg, s, nents, i) {
+		sg_dma_address(s) = sg_map->mapped_dma_addrs[i];
+		sg_dma_len(s) = sg_map->sizes[i];
 	}
 
-	kfree(dma_addrs);
-	return mapped;
+	return nents;
+
+err_unmap_orig:
+	if (ad->orig_dma_ops->unmap_sg)
+		ad->orig_dma_ops->unmap_sg(dev, sg, nents, dir, attrs);
+	else
+		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+					 dma_unmap_sg_attrs(dev, sg, nents,
+							    dir, attrs));
+err_remove_sg_map:
+	spin_lock_irqsave(&ad->maps_lock, flags);
+	list_del(&sg_map->node);
+	spin_unlock_irqrestore(&ad->maps_lock, flags);
+err_free_sg_map:
+	kfree(sg_map->mapped_dma_addrs);
+	kfree(sg_map->orig_dma_addrs);
+	kfree(sg_map->orig_dma_lens);
+	kfree(sg_map->sizes);
+	kfree(sg_map);
+	return error;
 }
 
 static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
@@ -1087,8 +1308,9 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 {
 	struct apple_dma_dev *ad = apple_dma_find_by_dev(dev);
 	struct scatterlist *s;
-	struct apple_dma_map_entry **entries = NULL;
+	struct apple_dma_sg_mapping *sg_map = NULL, *candidate;
 	unsigned int count;
+	unsigned long flags;
 	int i;
 
 	count = apple_dma_trace_stat_inc(APPLE_DMA_STAT_UNMAP_SG);
@@ -1097,28 +1319,46 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 			 count, nents);
 
 	if (ad && ad->ready) {
-		entries = kcalloc(nents, sizeof(*entries), GFP_KERNEL);
-		if (!entries)
-			apple_dma_panic_state(dev, "unmap_sg: alloc failed");
+		spin_lock_irqsave(&ad->maps_lock, flags);
+		list_for_each_entry(candidate, &ad->sg_maps, node) {
+			if (candidate->sg == sg) {
+				sg_map = candidate;
+				list_del(&sg_map->node);
+				break;
+			}
+		}
+		spin_unlock_irqrestore(&ad->maps_lock, flags);
+		if (!sg_map || sg_map->nents != nents)
+			apple_dma_panic_state(dev,
+					      "unmap_sg: missing mapping record");
 
-		for_each_sg(sg, s, nents, i) {
-			entries[i] = apple_dma_take(ad, sg_dma_address(s),
-						    sg_dma_len(s));
-			if (!entries[i])
+		for_each_sg(sg, s, sg_map->nents, i) {
+			struct apple_dma_map_entry *e;
+
+			e = apple_dma_take(ad, sg_map->mapped_dma_addrs[i],
+					   sg_map->sizes[i]);
+			if (!e)
 				apple_dma_panic_state(dev,
 						      "unmap_sg: missing mapping");
 			apple_dma_trace_record(ad, APPLE_DMA_TRACE_OP_UNMAP_SG,
-					       entries[i]->window->base_gpa +
-					       (entries[i]->mapped_dma -
-					        entries[i]->window->dma_addr),
-					       entries[i]->size);
-			sg_dma_address(s) = entries[i]->orig_dma;
+					       e->window->base_gpa +
+					       (e->mapped_dma -
+						e->window->dma_addr),
+					       e->size);
+			mutex_lock(&ad->batch_lock);
+			apple_dma_release_entry(ad, dev, e);
+			mutex_unlock(&ad->batch_lock);
+			kfree(e);
 		}
-
-		mutex_lock(&ad->batch_lock);
-		for (i = 0; i < nents; i++)
-			apple_dma_release_entry(ad, dev, entries[i]);
-		mutex_unlock(&ad->batch_lock);
+		for_each_sg(sg, s, sg_map->nents, i) {
+			sg_dma_address(s) = sg_map->orig_dma_addrs[i];
+			sg_dma_len(s) = sg_map->orig_dma_lens[i];
+		}
+		kfree(sg_map->mapped_dma_addrs);
+		kfree(sg_map->orig_dma_addrs);
+		kfree(sg_map->orig_dma_lens);
+		kfree(sg_map->sizes);
+		kfree(sg_map);
 	}
 
 	if (!ad || !ad->orig_dma_ops)
@@ -1128,11 +1368,6 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 	else if (ad->orig_dma_ops->unmap_sg)
 		ad->orig_dma_ops->unmap_sg(dev, sg, nents, dir, attrs);
 
-	if (entries) {
-		for (i = 0; i < nents; i++)
-			kfree(entries[i]);
-	}
-	kfree(entries);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1149,6 +1384,14 @@ static int apple_dma_remap_alloc(struct apple_dma_dev *ad, struct device *dev,
 	ret = apple_dma_map_one(ad, dev, phys, size, orig_dma, &mapped_dma);
 	if (ret)
 		return ret;
+
+	if (mapped_dma > dev->coherent_dma_mask ||
+	    size - 1 > dev->coherent_dma_mask - mapped_dma) {
+		apple_dma_unmap_one(ad, dev, mapped_dma, size,
+				    APPLE_DMA_TRACE_OP_FREE);
+		dev_warn(dev, "apple_dma: mapped allocation exceeds coherent DMA mask\n");
+		return -ERANGE;
+	}
 
 	*dma_handle = mapped_dma;
 	return 0;
@@ -1174,6 +1417,14 @@ static void *apple_dma_alloc(struct device *dev, size_t size,
 							   gfp, attrs));
 	if (!cpu_addr)
 		return NULL;
+
+	if (!virt_addr_valid(cpu_addr)) {
+		dev_warn(dev, "apple_dma: coherent allocation is not directly mapped\n");
+		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+					 dma_free_attrs(dev, size, cpu_addr,
+							orig_dma, attrs));
+		return NULL;
+	}
 
 	phys = virt_to_phys(cpu_addr);
 	if (apple_dma_remap_alloc(ad, dev, phys, size, orig_dma, dma_handle)) {
@@ -1255,6 +1506,9 @@ static void apple_dma_free_pages(struct device *dev, size_t size,
 typedef void (*apple_dma_sync_fn_t)(struct device *dev, dma_addr_t dma_handle,
 				    size_t size,
 				    enum dma_data_direction dir);
+typedef void (*apple_dma_sync_sg_fn_t)(struct device *dev,
+				       struct scatterlist *sg, int nents,
+				       enum dma_data_direction dir);
 
 static dma_addr_t apple_dma_translate_dma_handle(struct apple_dma_dev *ad,
 						 dma_addr_t dma_handle)
@@ -1280,10 +1534,42 @@ static void apple_dma_sync_sg_common(struct apple_dma_dev *ad,
 				     struct device *dev,
 				     struct scatterlist *sg, int nents,
 				     enum dma_data_direction dir,
-				     apple_dma_sync_fn_t sync_fn)
+				     apple_dma_sync_fn_t sync_fn,
+				     apple_dma_sync_sg_fn_t sync_sg_fn)
 {
 	struct scatterlist *s;
+	struct apple_dma_sg_mapping *sg_map = NULL, *candidate;
+	unsigned long flags;
 	int i;
+
+	if (ad && ad->ready) {
+		spin_lock_irqsave(&ad->maps_lock, flags);
+		list_for_each_entry(candidate, &ad->sg_maps, node) {
+			if (candidate->sg == sg) {
+				sg_map = candidate;
+				break;
+			}
+		}
+		spin_unlock_irqrestore(&ad->maps_lock, flags);
+	}
+
+	if (sg_map) {
+		for_each_sg(sg, s, sg_map->nents, i) {
+			sg_dma_address(s) = sg_map->orig_dma_addrs[i];
+			sg_dma_len(s) = sg_map->orig_dma_lens[i];
+		}
+		if (sync_sg_fn) {
+			sync_sg_fn(dev, sg, sg_map->nents, dir);
+		} else if (sync_fn) {
+			for_each_sg(sg, s, sg_map->orig_mapped, i)
+				sync_fn(dev, sg_dma_address(s), sg_dma_len(s), dir);
+		}
+		for_each_sg(sg, s, sg_map->nents, i) {
+			sg_dma_address(s) = sg_map->mapped_dma_addrs[i];
+			sg_dma_len(s) = sg_map->sizes[i];
+		}
+		return;
+	}
 
 	if (!sync_fn)
 		return;
@@ -1327,7 +1613,9 @@ static void apple_dma_sync_sg_for_cpu(struct device *dev,
 
 	apple_dma_sync_sg_common(ad, dev, sg, nents, dir,
 				 ad && ad->orig_dma_ops ?
-				 ad->orig_dma_ops->sync_single_for_cpu : NULL);
+				 ad->orig_dma_ops->sync_single_for_cpu : NULL,
+				 ad && ad->orig_dma_ops ?
+				 ad->orig_dma_ops->sync_sg_for_cpu : NULL);
 }
 
 static void apple_dma_sync_sg_for_device(struct device *dev,
@@ -1339,7 +1627,9 @@ static void apple_dma_sync_sg_for_device(struct device *dev,
 	apple_dma_sync_sg_common(ad, dev, sg, nents, dir,
 				 ad && ad->orig_dma_ops ?
 				 ad->orig_dma_ops->sync_single_for_device :
-				 NULL);
+				 NULL,
+				 ad && ad->orig_dma_ops ?
+				 ad->orig_dma_ops->sync_sg_for_device : NULL);
 }
 
 static const struct dma_map_ops apple_dma_ops = {
@@ -1418,6 +1708,7 @@ static void apple_dma_remove_instance(struct apple_dma_dev *ad)
 static void apple_dma_release_resources(struct pci_dev *pdev,
 					struct apple_dma_dev *ad)
 {
+#ifdef CONFIG_ARM64
 	if (ad->uvm_page_patched) {
 		mutex_lock(&instances_lock);
 		if (--uvm_page_refcount == 0)
@@ -1430,6 +1721,7 @@ static void apple_dma_release_resources(struct pci_dev *pdev,
 			dczid_patch_revert();
 		mutex_unlock(&instances_lock);
 	}
+#endif
 	apple_dma_unbind_managed_pci(ad);
 	apple_dma_free_all(ad);
 	kfree(ad->cmd_page);
@@ -1460,6 +1752,7 @@ static int apple_dma_probe(struct pci_dev *pdev,
 	mutex_init(&ad->batch_lock);
 	spin_lock_init(&ad->maps_lock);
 	INIT_LIST_HEAD(&ad->maps);
+	INIT_LIST_HEAD(&ad->sg_maps);
 
 	ret = pci_enable_device(pdev);
 	if (ret)
@@ -1509,6 +1802,7 @@ static int apple_dma_probe(struct pci_dev *pdev,
 	if (ret)
 		goto err_release;
 
+#ifdef CONFIG_ARM64
 	if (!enable_quirks) {
 		dev_info(&pdev->dev, "vendor quirks disabled by module parameter\n");
 	} else {
@@ -1540,6 +1834,11 @@ static int apple_dma_probe(struct pci_dev *pdev,
 			ad->uvm_page_patched = true;
 		}
 	}
+#else
+	if (enable_quirks || enable_tso)
+		dev_info(&pdev->dev,
+			 "ARM-specific quirks are unavailable on this architecture\n");
+#endif
 
 	/* Add to instance list and mark ready */
 	mutex_lock(&instances_lock);
@@ -1594,6 +1893,14 @@ static int __init apple_dma_init(void)
 {
 	int ret;
 
+#ifndef CONFIG_ARM64
+	if (window_shift) {
+		pr_err("apple_dma: x86 requires exact DMA mappings; "
+		       "window_shift must be 0\n");
+		return -EINVAL;
+	}
+#endif
+
 	pr_info("apple_dma: init (guest-side window refcount + teardown unmap)\n");
 
 	if (window_shift > 0 && window_shift < 12) {
@@ -1618,13 +1925,17 @@ static int __init apple_dma_init(void)
 
 	apple_dma_trace_init();
 
+#ifdef CONFIG_ARM64
 	if (enable_tso)
 		tso_patch_apply();
+#endif
 
 	ret = pci_register_driver(&apple_dma_pci_driver);
 	if (ret) {
+#ifdef CONFIG_ARM64
 		if (enable_tso)
 			tso_patch_revert();
+#endif
 		apple_dma_trace_exit();
 	}
 	return ret;
@@ -1649,8 +1960,10 @@ static void __exit apple_dma_exit(void)
 		apple_dma_trace_stat_get(APPLE_DMA_STAT_FREE),
 		total_maps, total_bytes, total_windows);
 	pci_unregister_driver(&apple_dma_pci_driver);
+#ifdef CONFIG_ARM64
 	if (enable_tso)
 		tso_patch_revert();
+#endif
 	apple_dma_trace_exit();
 }
 

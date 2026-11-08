@@ -46,7 +46,8 @@ system_ss.add(when: 'CONFIG_VFIO_PCI', if_true: files(
 if host_os == 'darwin'
   system_ss.add(when: 'CONFIG_VFIO',
                 if_true: [files('apple-device.c', 'apple-dma.c',
-                                'container-apple.c', 'apple-dext-client.c'),
+                                'container-apple.c', 'apple-dext-client.c',
+                                'apple-host-backend.c'),
                           coref, iokit])
   # FDT helper lives in specific_ss because libfdt is only linked into
   # targets that set CONFIG_DEVICE_TREE; system_ss is compiled once and

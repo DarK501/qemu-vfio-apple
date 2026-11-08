@@ -30,11 +30,45 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-OUT_DIR="${1:-$REPO_ROOT/contrib/apple-vfio/image-builder/out/ubuntu-desktop-image}"
+OUTPUT_DIR="${1:-}"
+
+GUEST_ARCH="${GUEST_ARCH:-$(uname -m)}"
+case "$GUEST_ARCH" in
+    arm64)
+        QEMU_TARGET="aarch64"
+        QEMU_MACHINE="virt,highmem=on"
+        DEFAULT_IMAGE_NAME="ubuntu-desktop-resolute-arm64"
+        EFI_CODE_NAME="edk2-aarch64-code.fd"
+        EFI_VARS_NAMES=("edk2-arm-vars.fd" "edk2-aarch64-vars.fd")
+        ;;
+    x86_64)
+        QEMU_TARGET="x86_64"
+        QEMU_MACHINE="q35"
+        DEFAULT_IMAGE_NAME="ubuntu-desktop-resolute-x86_64"
+        EFI_CODE_NAME="edk2-x86_64-code.fd"
+        EFI_VARS_NAMES=("edk2-i386-vars.fd" "edk2-x86_64-vars.fd")
+        ;;
+    *)
+        printf '[seal-image] error: unsupported GUEST_ARCH=%s\n' "$GUEST_ARCH" >&2
+        exit 1
+        ;;
+esac
+HOST_ARCH="$(uname -m)"
+if [ "$GUEST_ARCH" != "$HOST_ARCH" ]; then
+    printf '[seal-image] error: HVF requires GUEST_ARCH=%s on this %s host\n' \
+        "$HOST_ARCH" "$HOST_ARCH" >&2
+    exit 1
+fi
+if [ -n "$OUTPUT_DIR" ]; then
+    OUT_DIR="$OUTPUT_DIR"
+elif [ "$GUEST_ARCH" = "arm64" ]; then
+    OUT_DIR="$REPO_ROOT/contrib/apple-vfio/image-builder/out/ubuntu-desktop-image"
+else
+    OUT_DIR="$REPO_ROOT/contrib/apple-vfio/image-builder/out/ubuntu-desktop-image-x86_64"
+fi
 WORK_DIR="$OUT_DIR/work"
 ARTIFACT_DIR="$OUT_DIR/artifacts"
-
-IMAGE_NAME="${IMAGE_NAME:-ubuntu-desktop-resolute-arm64}"
+IMAGE_NAME="${IMAGE_NAME:-$DEFAULT_IMAGE_NAME}"
 CPUS="${CPUS:-8}"
 MEMORY="${MEMORY:-12G}"
 BUILD_USER="${BUILD_USER:-ubuntu}"
@@ -73,9 +107,9 @@ pick_existing() {
 resolve_qemu() {
     if [ -z "$QEMU_BIN" ]; then
         QEMU_BIN="$(pick_existing \
-            "$REPO_ROOT/dist/qemu-system-aarch64" \
-            "$REPO_ROOT/build/qemu-system-aarch64" \
-        )" || die "qemu-system-aarch64 not found"
+            "$REPO_ROOT/dist/qemu-system-$QEMU_TARGET" \
+            "$REPO_ROOT/build/qemu-system-$QEMU_TARGET" \
+        )" || die "qemu-system-$QEMU_TARGET not found"
     fi
     if [ -z "$QEMU_IMG_BIN" ]; then
         QEMU_IMG_BIN="$(pick_existing \
@@ -92,20 +126,23 @@ resolve_qemu() {
     fi
     if [ -z "$EFI_CODE_SRC" ]; then
         EFI_CODE_SRC="$(pick_existing \
-            "$REPO_ROOT/build/pc-bios/edk2-aarch64-code.fd" \
-            "$REPO_ROOT/build/qemu-bundle/usr/local/share/qemu/edk2-aarch64-code.fd" \
-            "$REPO_ROOT/dist/share/qemu/edk2-aarch64-code.fd" \
-        )" || die "edk2-aarch64-code.fd not found"
+            "$REPO_ROOT/build/pc-bios/$EFI_CODE_NAME" \
+            "$REPO_ROOT/build/qemu-bundle/usr/local/share/qemu/$EFI_CODE_NAME" \
+            "$REPO_ROOT/dist/share/qemu/$EFI_CODE_NAME" \
+        )" || die "$EFI_CODE_NAME not found"
     fi
     if [ -z "$EFI_VARS_SRC" ]; then
-        EFI_VARS_SRC="$(pick_existing \
-            "$REPO_ROOT/build/pc-bios/edk2-arm-vars.fd" \
-            "$REPO_ROOT/build/pc-bios/edk2-aarch64-vars.fd" \
-            "$REPO_ROOT/build/qemu-bundle/usr/local/share/qemu/edk2-arm-vars.fd" \
-            "$REPO_ROOT/build/qemu-bundle/usr/local/share/qemu/edk2-aarch64-vars.fd" \
-            "$REPO_ROOT/dist/share/qemu/edk2-arm-vars.fd" \
-            "$REPO_ROOT/dist/share/qemu/edk2-aarch64-vars.fd" \
-        )" || die "arm64 edk2 vars not found"
+        local vars_candidates=()
+        local vars_name
+        for vars_name in "${EFI_VARS_NAMES[@]}"; do
+            vars_candidates+=(
+                "$REPO_ROOT/build/pc-bios/$vars_name"
+                "$REPO_ROOT/build/qemu-bundle/usr/local/share/qemu/$vars_name"
+                "$REPO_ROOT/dist/share/qemu/$vars_name"
+            )
+        done
+        EFI_VARS_SRC="$(pick_existing "${vars_candidates[@]}")" ||
+            die "firmware vars template not found for $GUEST_ARCH; set EFI_VARS_SRC"
     fi
 }
 
@@ -127,7 +164,7 @@ boot_seal_vm() {
         -L "$QEMU_DATA_DIR" \
         -accel hvf \
         -cpu host \
-        -machine virt,highmem=on \
+        -machine "$QEMU_MACHINE" \
         -smp "$CPUS" \
         -m "$MEMORY" \
         -display none \

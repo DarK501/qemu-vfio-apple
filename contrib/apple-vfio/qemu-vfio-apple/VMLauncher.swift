@@ -1,4 +1,4 @@
-// VMLauncher.swift — orchestrate `qemu-system-aarch64` against a cached
+// VMLauncher.swift — orchestrate the host-native QEMU target against a cached
 // base image and a writable overlay.
 //
 // Responsibilities:
@@ -18,8 +18,7 @@
 //   4. Optionally auto-detect a dext-bound display controller for
 //      `-device vfio-apple-pci,host=<BDF>,dma-companion=on` passthrough.
 //
-//   5. Assemble a qemu argv matching the apple-vfio machine config
-//      pattern (virt machine with an aux-ram-share memory-backend-ram)
+//   5. Assemble a host-native QEMU argv (virt on arm64, q35 on x86_64)
 //      and exec it, forwarding signals so ^C cleanly shuts down the
 //      guest.
 
@@ -39,7 +38,7 @@ enum LaunchError: LocalizedError {
               \(path)
             """
         case .qemuImgFailed(let c, let s): return "qemu-img exited \(c): \(s)"
-        case .qemuLaunchFailed(let s):     return "could not start qemu-system-aarch64: \(s)"
+        case .qemuLaunchFailed(let s):     return "could not start QEMU: \(s)"
         case .extraDisk(let s):            return s
         }
     }
@@ -58,11 +57,12 @@ struct ResolvedDisk {
 // MARK: - Bundle discovery
 
 struct LauncherBundle {
+    let architecture: GuestArchitecture
     let qemuBinary:   URL
     let qemuImgBin:   URL
     let shareDir:     URL   // -L argument: .../Contents/Resources/share/qemu
-    let efiCodeFile:  URL   // .../share/qemu/edk2-aarch64-code.fd
-    let efiVarsFile:  URL   // .../share/qemu/edk2-arm-vars.fd (template)
+    let efiCodeFile:  URL
+    let efiVarsFile:  URL
 }
 
 /// Locate the bundled qemu binaries + firmware.
@@ -74,21 +74,22 @@ struct LauncherBundle {
 ///
 /// When run from a development build (e.g. swift build in a plain
 /// directory), we fall back to `PATH` so manual testing still works.
-func discoverLauncherBundle() throws -> LauncherBundle {
+func discoverLauncherBundle(architecture: GuestArchitecture) throws -> LauncherBundle {
     let exe = executableURL()
     let macosDir = exe.deletingLastPathComponent()
     let contents = macosDir.deletingLastPathComponent()
     let resources = contents.appendingPathComponent("Resources")
     let share = resources.appendingPathComponent("share/qemu")
 
-    if let b = tryAssembleBundle(binariesIn: macosDir, shareDir: share) {
+    if let b = tryAssembleBundle(binariesIn: macosDir, shareDir: share,
+                                 architecture: architecture) {
         return b
     }
 
     // Fall back to PATH. EFI vars and code come from the system qemu
     // install (e.g. homebrew) — paths are user-dependent so we only try
     // a couple of common locations.
-    if let qemu = whichOnPATH("qemu-system-aarch64"),
+    if let qemu = whichOnPATH(architecture.qemuBinary),
        let qemuImg = whichOnPATH("qemu-img")
     {
         for candidate in ["/opt/homebrew/share/qemu",
@@ -98,7 +99,8 @@ func discoverLauncherBundle() throws -> LauncherBundle {
             let share = URL(fileURLWithPath: candidate)
             if let b = tryAssembleBundle(qemuBinary: qemu,
                                          qemuImgBin: qemuImg,
-                                         shareDir: share)
+                                         shareDir: share,
+                                         architecture: architecture)
             {
                 return b
             }
@@ -110,19 +112,18 @@ func discoverLauncherBundle() throws -> LauncherBundle {
     // single most common failure mode is a make-dist.sh that only
     // staged the code file and not the vars template.
     let fm = FileManager.default
-    let qemu    = macosDir.appendingPathComponent("qemu-system-aarch64")
+    let qemu    = macosDir.appendingPathComponent(architecture.qemuBinary)
     let qemuImg = macosDir.appendingPathComponent("qemu-img")
-    let efiCode = share.appendingPathComponent("edk2-aarch64-code.fd")
-    let efiVarsCandidates = [
-        share.appendingPathComponent("edk2-arm-vars.fd").path,
-        share.appendingPathComponent("edk2-aarch64-vars.fd").path,
-    ]
+    let efiCode = share.appendingPathComponent(architecture.efiCodeName)
+    let efiVarsCandidates = architecture.efiVarsNames.map {
+        share.appendingPathComponent($0).path
+    }
     var missing: [String] = []
     if !fm.isExecutableFile(atPath: qemu.path)      { missing.append(qemu.path) }
     if !fm.isExecutableFile(atPath: qemuImg.path)   { missing.append(qemuImg.path) }
     if !fm.fileExists(atPath: efiCode.path)         { missing.append(efiCode.path) }
     if efiVarsCandidates.allSatisfy({ !fm.fileExists(atPath: $0) }) {
-        missing.append("\(efiVarsCandidates[0]) (or edk2-aarch64-vars.fd)")
+        missing.append("one of: " + efiVarsCandidates.joined(separator: ", "))
     }
     throw LaunchError.bundleMissing(missing.joined(separator: "\n  "))
 }
@@ -130,25 +131,27 @@ func discoverLauncherBundle() throws -> LauncherBundle {
 /// Try to assemble a LauncherBundle from an explicit (binariesDir, shareDir)
 /// pair. Returns nil if any required piece is missing.
 private func tryAssembleBundle(binariesIn macosDir: URL,
-                               shareDir share: URL) -> LauncherBundle?
+                               shareDir share: URL,
+                               architecture: GuestArchitecture) -> LauncherBundle?
 {
-    let qemu    = macosDir.appendingPathComponent("qemu-system-aarch64")
+    let qemu    = macosDir.appendingPathComponent(architecture.qemuBinary)
     let qemuImg = macosDir.appendingPathComponent("qemu-img")
     return tryAssembleBundle(qemuBinary: qemu,
                              qemuImgBin: qemuImg,
-                             shareDir: share)
+                             shareDir: share,
+                             architecture: architecture)
 }
 
 private func tryAssembleBundle(qemuBinary qemu: URL,
                                qemuImgBin qemuImg: URL,
-                               shareDir share: URL) -> LauncherBundle?
+                               shareDir share: URL,
+                               architecture: GuestArchitecture) -> LauncherBundle?
 {
     let fm = FileManager.default
-    let efiCode = share.appendingPathComponent("edk2-aarch64-code.fd")
-    let efiVars = firstExisting([
-        share.appendingPathComponent("edk2-arm-vars.fd"),
-        share.appendingPathComponent("edk2-aarch64-vars.fd"),
-    ])
+    let efiCode = share.appendingPathComponent(architecture.efiCodeName)
+    let efiVars = firstExisting(architecture.efiVarsNames.map {
+        share.appendingPathComponent($0)
+    })
     guard fm.isExecutableFile(atPath: qemu.path),
           fm.isExecutableFile(atPath: qemuImg.path),
           fm.fileExists(atPath: efiCode.path),
@@ -156,7 +159,8 @@ private func tryAssembleBundle(qemuBinary qemu: URL,
     else {
         return nil
     }
-    return LauncherBundle(qemuBinary: qemu,
+    return LauncherBundle(architecture: architecture,
+                          qemuBinary: qemu,
                           qemuImgBin: qemuImg,
                           shareDir: share,
                           efiCodeFile: efiCode,
@@ -296,10 +300,14 @@ private func runQemuImg(_ qemuImg: URL, args: [String]) throws {
 // MARK: - Launch
 
 func launchVM(base: URL, opts: Options) throws {
-    let bundle = try discoverLauncherBundle()
+    guard opts.architecture == GuestArchitecture.hostDefault else {
+        throw LaunchError.bundleMissing(
+            "HVF requires a guest architecture matching this host; use --arch \(GuestArchitecture.hostDefault.rawValue)")
+    }
+    let bundle = try discoverLauncherBundle(architecture: opts.architecture)
 
     let overlay = resolvedOverlayURL(opts)
-    let vars = efiVarsURL(for: opts.vmName)
+    let vars = efiVarsURL(for: opts.vmName, architecture: opts.architecture)
 
     try ensureOverlay(overlay, base: base, bundle: bundle)
     try ensureEfiVars(vars, template: bundle.efiVarsFile)
@@ -357,9 +365,9 @@ func launchVM(base: URL, opts: Options) throws {
     }
 
     if opts.runAsRoot {
-        log("running qemu-system-aarch64 under sudo (may prompt for password)")
+        log("running \(bundle.qemuBinary.lastPathComponent) under sudo (may prompt for password)")
     } else {
-        log("starting qemu-system-aarch64")
+        log("starting \(bundle.qemuBinary.lastPathComponent)")
     }
     // exec() replaces this process so qemu inherits our controlling TTY
     // and foreground process group directly. Going through Process() /
@@ -468,20 +476,14 @@ private func buildQemuArgv(opts: Options,
     // handles guest DMA in-kernel via the apple-dma companion, so
     // we no longer need the memory-backend-ram + aux-ram-share
     // gymnastics that the old user-mode PCI device required.
-    /*
-     * tso=on enables Apple's total-store-ordering memory model on every
-     * vCPU at vcpu-init time. This is what FEX-Emu and other x86 user-
-     * mode emulators want, and doing it from the host *before* the guest
-     * runs avoids the late-boot paging faults we used to see when the
-     * in-guest module flipped ACTLR_EL1.EnTSO mid-flight.
-     */
-    a += ["-accel", "hvf,tso=on"]
+    // Apple's TSO extension is relevant only to arm64 guests.
+    a += ["-accel", bundle.architecture == .arm64 ? "hvf,tso=on" : "hvf"]
     a += ["-cpu", "host"]
     a += ["-smp", "\(opts.cpus),sockets=1,cores=\(opts.cpus),threads=1"]
     // preallocate all guest memory, for performance
     a += ["-object",
           "memory-backend-ram,id=pc.ram,size=\(opts.memory),prealloc=on,share=off"]
-    a += ["-machine", "virt,highmem=on,memory-backend=pc.ram"]
+    a += ["-machine", "\(bundle.architecture.machine),memory-backend=pc.ram"]
     a += ["-m", opts.memory]
 
     // UEFI firmware.
@@ -594,4 +596,3 @@ private func shellQuote(_ s: String) -> String {
     }
     return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
 }
-

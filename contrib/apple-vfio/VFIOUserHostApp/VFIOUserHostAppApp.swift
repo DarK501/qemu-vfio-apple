@@ -3,7 +3,7 @@
 //  VFIOUserHostApp
 //
 //  Setup-only host app for the VFIOUserPCIDriver dext. Real device interaction
-//  happens out-of-process via qemu (bundled at Contents/MacOS/qemu-system-aarch64
+//  happens out-of-process via host-native QEMU (bundled under Contents/MacOS)
 //  by the "Embed QEMU" build phase).
 //
 

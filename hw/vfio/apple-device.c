@@ -14,7 +14,7 @@
 
 #include <linux/vfio.h>
 
-#include "apple-dext-client.h"
+#include "apple-host-backend.h"
 #include "hw/core/qdev-properties.h"
 #include "hw/vfio/apple.h"
 #include "hw/vfio/vfio-container.h"
@@ -27,6 +27,9 @@
 typedef struct AppleVFIOSharedDext {
     io_connect_t conn;
     uint32_t refs;
+    uint32_t managed_bdf;
+    bool owner_attached;
+    bool dma_attached;
 } AppleVFIOSharedDext;
 
 typedef struct AppleVFIODMAProbe {
@@ -34,6 +37,7 @@ typedef struct AppleVFIODMAProbe {
     uint64_t host_bus;
     uint64_t host_device;
     uint64_t host_function;
+    const char *host_root;
     DeviceState *match;
 } AppleVFIODMAProbe;
 
@@ -73,6 +77,7 @@ static void apple_vfio_find_dma_companion_cb(PCIBus *bus, PCIDevice *pdev,
     uint64_t host_bus;
     uint64_t host_device;
     uint64_t host_function;
+    char *host_root;
 
     if (probe->match ||
         !object_dynamic_cast(OBJECT(pdev), "apple-dma-pci")) {
@@ -105,12 +110,23 @@ static void apple_vfio_find_dma_companion_cb(PCIBus *bus, PCIDevice *pdev,
         return;
     }
 
+    host_root = object_property_get_str(OBJECT(pdev), "x-apple-host-root",
+                                        &err);
+    if (err) {
+        error_free(err);
+        return;
+    }
+
     if (managed_bdf == probe->managed_bdf &&
         host_bus == probe->host_bus &&
         host_device == probe->host_device &&
-        host_function == probe->host_function) {
+        host_function == probe->host_function &&
+        g_strcmp0(host_root && host_root[0] ? host_root : "",
+                  probe->host_root && probe->host_root[0] ?
+                  probe->host_root : "") == 0) {
         probe->match = DEVICE(pdev);
     }
+    g_free(host_root);
 }
 
 static DeviceState *apple_vfio_find_dma_companion(VFIOApplePCIDevice *adev)
@@ -122,6 +138,7 @@ static DeviceState *apple_vfio_find_dma_companion(VFIOApplePCIDevice *adev)
         .host_bus = vdev->host.bus,
         .host_device = vdev->host.slot,
         .host_function = vdev->host.function,
+        .host_root = adev->host_root,
     };
 
     pci_for_each_device_under_bus(pci_device_root_bus(pdev),
@@ -195,8 +212,9 @@ static void apple_vfio_irq_handler(void *opaque)
         return;
     }
 
-    if (apple_dext_read_pending_irqs(conn, pending) != KERN_SUCCESS) {
-        apple_dext_interrupt_notify_rearm(apple->irq_notify);
+    if (apple_host_backend()->client->read_pending_irqs(conn, pending) !=
+        KERN_SUCCESS) {
+        apple_host_backend()->client->interrupt_notify_rearm(apple->irq_notify);
         return;
     }
 
@@ -212,7 +230,7 @@ static void apple_vfio_irq_handler(void *opaque)
         }
     }
 
-    apple_dext_interrupt_notify_rearm(apple->irq_notify);
+    apple_host_backend()->client->interrupt_notify_rearm(apple->irq_notify);
 }
 
 bool apple_vfio_get_bar_info(VFIOApplePCIDevice *adev, uint8_t bar,
@@ -222,7 +240,8 @@ bool apple_vfio_get_bar_info(VFIOApplePCIDevice *adev, uint8_t bar,
     io_connect_t conn = apple_vfio_connection(&VFIO_PCI_DEVICE(adev)->vbasedev);
 
     if (conn != IO_OBJECT_NULL) {
-        return apple_dext_get_bar_info(conn, bar, mem_idx, size, type) ==
+        return apple_host_backend()->client->get_bar_info(
+                   conn, bar, mem_idx, size, type) ==
                KERN_SUCCESS;
     }
 
@@ -339,7 +358,7 @@ bool apple_vfio_device_setup(VFIOApplePCIDevice *adev, Error **errp)
         return false;
     }
 
-    kr = apple_dext_setup_interrupts(conn, &num_vectors);
+    kr = apple_host_backend()->client->setup_interrupts(conn, &num_vectors);
     if (kr != KERN_SUCCESS) {
         error_setg(errp, "vfio-apple: failed to setup interrupts (kr=0x%x)",
                    kr);
@@ -357,7 +376,8 @@ bool apple_vfio_device_setup(VFIOApplePCIDevice *adev, Error **errp)
                         apple_vfio_irq_handler, NULL, adev);
 
     adev->apple->irq_notify =
-        apple_dext_interrupt_notify_create(conn, apple_vfio_irq_wakeup, adev);
+        apple_host_backend()->client->interrupt_notify_create(
+            conn, apple_vfio_irq_wakeup, adev);
     if (!adev->apple->irq_notify) {
         error_setg(errp,
                    "vfio-apple: failed to create IRQ async notification");
@@ -380,7 +400,8 @@ void apple_vfio_device_cleanup(VFIOApplePCIDevice *adev)
     }
 
     if (apple->irq_notify) {
-        apple_dext_interrupt_notify_destroy(apple->irq_notify);
+        apple_host_backend()->client->interrupt_notify_destroy(
+            apple->irq_notify);
         apple->irq_notify = NULL;
 
         qemu_set_fd_handler(event_notifier_get_fd(&apple->irq_notifier),
@@ -403,7 +424,8 @@ static int apple_vfio_device_reset(VFIODevice *vbasedev)
         return -ENODEV;
     }
 
-    return apple_dext_reset_device(conn) == KERN_SUCCESS ? 0 : -EIO;
+    return apple_host_backend()->client->reset_device(conn) == KERN_SUCCESS ?
+        0 : -EIO;
 }
 
 static int apple_vfio_get_region_info(VFIODevice *vbasedev,
@@ -511,7 +533,7 @@ static void apple_vfio_update_irq_mask(VFIODevice *vbasedev)
         break;
     }
 
-    apple_dext_set_irq_mask(conn, mask);
+    apple_host_backend()->client->set_irq_mask(conn, mask);
 }
 
 static int apple_vfio_set_irqs(VFIODevice *vbasedev, struct vfio_irq_set *irq)
@@ -565,7 +587,8 @@ static int apple_vfio_region_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
     if (legacy_size == 1 || legacy_size == 2 || legacy_size == 4) {
         uint64_t value = 0;
 
-        kr = apple_dext_config_read(conn, off, legacy_size, &value);
+        kr = apple_host_backend()->client->config_read(
+            conn, off, legacy_size, &value);
         if (kr != KERN_SUCCESS) {
             return -EIO;
         }
@@ -577,7 +600,8 @@ static int apple_vfio_region_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
         return size;
     }
 
-    kr = apple_dext_config_read_block(conn, off, data, legacy_size);
+    kr = apple_host_backend()->client->config_read_block(
+        conn, off, data, legacy_size);
     if (kr != KERN_SUCCESS) {
         return -EIO;
     }
@@ -595,7 +619,7 @@ static bool apple_vfio_config_write_is_safe(VFIOPCIDevice *vdev,
 
     /*
      * Block writes that would reprogram the device's bus identity or
-     * address decoders.  macOS / DART owns those registers; touching
+     * address decoders. The host PCI stack owns those registers; touching
      * them from the guest breaks the IOKit mapping and the device
      * "falls off the bus."
      *
@@ -630,7 +654,7 @@ static bool apple_vfio_config_write_is_safe(VFIOPCIDevice *vdev,
 
     /*
      * PCIe Device Control / Device Control 2 — writing MPS or MRRS to
-     * the physical device while DART mappings are active causes PCIe
+     * the physical device while host IOMMU mappings are active causes PCIe
      * completion timeouts.
      */
     if (pdev->cap_present & QEMU_PCI_CAP_EXPRESS) {
@@ -659,7 +683,8 @@ static int apple_vfio_forward_command_write(io_connect_t conn, off_t off,
 
     for (pos = cmd_start; pos < cmd_end; pos++) {
         uint64_t value = bytes[pos - off];
-        kern_return_t kr = apple_dext_config_write(conn, pos, 1, value);
+        kern_return_t kr = apple_host_backend()->client->config_write(
+            conn, pos, 1, value);
 
         if (kr != KERN_SUCCESS) {
             return -EIO;
@@ -733,7 +758,8 @@ static int apple_vfio_region_write(VFIODevice *vbasedev, uint8_t nr, off_t off,
         return -EINVAL;
     }
 
-    kr = apple_dext_config_write(conn, off, legacy_size, value);
+    kr = apple_host_backend()->client->config_write(
+        conn, off, legacy_size, value);
     if (kr != KERN_SUCCESS) {
         return -EIO;
     }
@@ -774,7 +800,8 @@ static int apple_vfio_region_map(VFIODevice *vbasedev, VFIORegion *region)
         return 0;
     }
 
-    kr = apple_dext_map_bar(conn, bar, &local_addr, &bar_size, &bar_type);
+    kr = apple_host_backend()->client->map_bar(
+        conn, bar, &local_addr, &bar_size, &bar_type);
     if (kr != KERN_SUCCESS) {
         warn_report("vfio-apple: BAR%d map failed for %s: 0x%x",
                     bar, vbasedev->name, kr);
@@ -823,7 +850,8 @@ static void apple_vfio_region_unmap(VFIODevice *vbasedev, VFIORegion *region)
     }
 
     if (conn != IO_OBJECT_NULL && bm->addr != NULL) {
-        apple_dext_unmap_bar(conn, bar, (mach_vm_address_t)bm->addr);
+        apple_host_backend()->client->unmap_bar(
+            conn, bar, (mach_vm_address_t)bm->addr);
     }
 
     bm->addr = NULL;
@@ -843,7 +871,8 @@ VFIODeviceIOOps apple_vfio_device_io_ops = {
 };
 
 bool apple_vfio_dext_publish(uint8_t bus, uint8_t device, uint8_t function,
-                             const char *host_root, io_connect_t conn)
+                             const char *host_root, uint32_t managed_bdf,
+                             io_connect_t conn)
 {
     AppleVFIOSharedDext *shared;
     gchar *key = apple_vfio_dext_key(bus, device, function, host_root);
@@ -861,13 +890,16 @@ bool apple_vfio_dext_publish(uint8_t bus, uint8_t device, uint8_t function,
     shared = g_new0(AppleVFIOSharedDext, 1);
     shared->conn = conn;
     shared->refs = 1;
+    shared->managed_bdf = managed_bdf;
+    shared->owner_attached = true;
     g_hash_table_insert(apple_vfio_shared_dexts, key, shared);
     return true;
 }
 
-io_connect_t apple_vfio_dext_lookup(uint8_t bus, uint8_t device,
-                                    uint8_t function,
-                                    const char *host_root)
+io_connect_t apple_vfio_dext_acquire_dma(uint8_t bus, uint8_t device,
+                                         uint8_t function,
+                                         const char *host_root,
+                                         uint32_t managed_bdf)
 {
     AppleVFIOSharedDext *shared;
     gchar *key;
@@ -879,36 +911,78 @@ io_connect_t apple_vfio_dext_lookup(uint8_t bus, uint8_t device,
     key = apple_vfio_dext_key(bus, device, function, host_root);
     shared = g_hash_table_lookup(apple_vfio_shared_dexts, key);
     g_free(key);
-    if (!shared) {
+    if (!shared || !shared->owner_attached || shared->dma_attached ||
+        shared->managed_bdf != managed_bdf) {
         return IO_OBJECT_NULL;
     }
 
+    shared->dma_attached = true;
     shared->refs++;
     return shared->conn;
+}
+
+bool apple_vfio_dext_dma_owner_attached(uint8_t bus, uint8_t device,
+                                        uint8_t function,
+                                        const char *host_root,
+                                        io_connect_t conn)
+{
+    AppleVFIOSharedDext *shared;
+    gchar *key;
+    bool attached;
+
+    if (!apple_vfio_shared_dexts) {
+        return false;
+    }
+
+    key = apple_vfio_dext_key(bus, device, function, host_root);
+    shared = g_hash_table_lookup(apple_vfio_shared_dexts, key);
+    attached = shared && shared->conn == conn && shared->owner_attached &&
+               shared->dma_attached;
+    g_free(key);
+    return attached;
+}
+
+static void apple_vfio_dext_release_ref(uint8_t bus, uint8_t device,
+                                        uint8_t function, const char *host_root,
+                                        io_connect_t conn, bool dma)
+{
+    AppleVFIOSharedDext *shared;
+    gchar *key;
+
+    key = apple_vfio_dext_key(bus, device, function, host_root);
+    shared = apple_vfio_shared_dexts ?
+        g_hash_table_lookup(apple_vfio_shared_dexts, key) : NULL;
+    if (!shared || shared->conn != conn ||
+        (dma ? !shared->dma_attached : !shared->owner_attached)) {
+        error_report("vfio-apple: invalid %s connection release",
+                     dma ? "DMA companion" : "VFIO owner");
+        g_free(key);
+        return;
+    }
+
+    if (dma) {
+        shared->dma_attached = false;
+    } else {
+        shared->owner_attached = false;
+    }
+    if (--shared->refs == 0) {
+        apple_host_backend()->client->disconnect(conn);
+        g_hash_table_remove(apple_vfio_shared_dexts, key);
+    }
+    g_free(key);
+}
+
+void apple_vfio_dext_release_dma(uint8_t bus, uint8_t device,
+                                 uint8_t function, const char *host_root,
+                                 io_connect_t conn)
+{
+    apple_vfio_dext_release_ref(bus, device, function, host_root, conn, true);
 }
 
 void apple_vfio_dext_release(uint8_t bus, uint8_t device, uint8_t function,
                              const char *host_root, io_connect_t conn)
 {
-    AppleVFIOSharedDext *shared;
-    gchar *key;
-
-    if (!apple_vfio_shared_dexts) {
-        return;
-    }
-
-    key = apple_vfio_dext_key(bus, device, function, host_root);
-    shared = g_hash_table_lookup(apple_vfio_shared_dexts, key);
-    if (!shared || shared->conn != conn) {
-        g_free(key);
-        return;
-    }
-
-    if (--shared->refs == 0) {
-        apple_dext_disconnect(conn);
-        g_hash_table_remove(apple_vfio_shared_dexts, key);
-    }
-    g_free(key);
+    apple_vfio_dext_release_ref(bus, device, function, host_root, conn, false);
 }
 
 /* ------------------------------------------------------------------ */
@@ -921,6 +995,18 @@ static VFIOAppleBounceList apple_vfio_bounce_list =
 VFIOAppleBounceList *apple_vfio_get_bounce_buffers(void)
 {
     return &apple_vfio_bounce_list;
+}
+
+static void apple_vfio_free_bounce_buffer(io_connect_t conn,
+                                          mach_vm_address_t addr)
+{
+    kern_return_t kr =
+        apple_host_backend()->client->free_dma_buffer(conn, addr);
+
+    if (kr != KERN_SUCCESS) {
+        error_report("vfio-apple: failed to complete or unmap bounce buffer "
+                     "(kr=0x%x); device shutdown is not guaranteed safe", kr);
+    }
 }
 
 static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
@@ -948,16 +1034,15 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
 
     /*
      * Ask the dext to allocate a DMA buffer and call PrepareForDMA as a
-     * single operation.  This yields a contiguous IOVA because the DART
+     * single operation. This yields a contiguous DMA range because the host
      * sees one IOBufferMemoryDescriptor rather than many small client
      * memory descriptors with guard-page gaps between them.
      *
      * The buffer is mapped into our address space via IOConnectMapMemory64
      * so we can back a guest MemoryRegion with it.
      */
-    kr = apple_dext_allocate_dma_buffer(conn, size, 0,
-                                        &bus_addr, &bus_len,
-                                        &map_addr, &map_size);
+    kr = apple_host_backend()->client->allocate_dma_buffer(
+        conn, size, 0, &bus_addr, &bus_len, &map_addr, &map_size);
     if (kr != KERN_SUCCESS) {
         error_setg(errp, "vfio-apple: AllocateDMABuffer failed "
                    "(size=%" PRIu64 " kr=0x%x)", size, kr);
@@ -968,7 +1053,7 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
         error_setg(errp, "vfio-apple: DMA buffer segment too short "
                    "(%" PRIu64 " < %" PRIu64 "); IOVA may not be contiguous",
                    bus_len, size);
-        apple_dext_free_dma_buffer(conn, map_addr);
+        apple_vfio_free_bounce_buffer(conn, map_addr);
         return false;
     }
 
@@ -982,7 +1067,7 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
                    bus_addr, bus_addr + size,
                    memory_region_name(mrs.mr));
         memory_region_unref(mrs.mr);
-        apple_dext_free_dma_buffer(conn, map_addr);
+        apple_vfio_free_bounce_buffer(conn, map_addr);
         return false;
     }
 
@@ -1033,8 +1118,8 @@ static void apple_vfio_teardown_bounce_buffer(VFIOApplePCIDevice *adev)
     }
 
     object_unparent(OBJECT(&bb->mr));
-    apple_dext_free_dma_buffer(conn,
-                              (mach_vm_address_t)(uintptr_t)bb->host_addr);
+    apple_vfio_free_bounce_buffer(conn,
+                                 (mach_vm_address_t)(uintptr_t)bb->host_addr);
     g_free(bb);
     adev->bounce = NULL;
 }

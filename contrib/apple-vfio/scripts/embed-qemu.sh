@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Xcode Run Script build phase: embed qemu-system-aarch64, qemu-img, and their
+# Xcode Run Script build phase: embed host-native QEMU targets, qemu-img, and their
 # dylibs + share data into the host app, signing each item.
 #
 # qemu-vfio-apple is built as a separate Xcode target ("qemu-vfio-apple") and
@@ -8,15 +8,15 @@
 # this script no longer touches it.
 #
 # Inputs (env):
-#   QEMU_DIST_DIR     explicit dist directory override; if its qemu binary
-#                     is present it wins over the in-tree and fetched paths
+#   QEMU_DIST_DIR     explicit dist directory override; if its host-target
+#                     QEMU binary is present it wins over in-tree/fetched paths
 #   TARGET_BUILD_DIR  set by Xcode  (e.g. .../Build/Products/Debug)
 #   WRAPPER_NAME      set by Xcode  (e.g. VFIOUserHostApp.app)
 #   EXPANDED_CODE_SIGN_IDENTITY[_NAME]  set by Xcode (resolved cert)
 #   CONFIGURATION     set by Xcode  (Debug | Release)
 #
 # Resolution order for the dist directory:
-#   1. $QEMU_DIST_DIR (if set and contains qemu-system-aarch64)
+#   1. $QEMU_DIST_DIR (if set and contains the host-target QEMU binary)
 #   2. $SRCROOT/../../dist                (in-tree build via
 #                                          ./contrib/apple-vfio/scripts/make-dist.sh)
 #   3. fetch-qemu-dist.sh — downloads + verifies the pinned tarball into
@@ -27,12 +27,21 @@
 #
 # Layout produced inside the bundle:
 #
-#   Contents/MacOS/qemu-system-aarch64       (signed w/ hypervisor entitlement)
+#   Contents/MacOS/qemu-system-<host-target> (signed w/ hypervisor entitlement)
 #   Contents/MacOS/qemu-img                  (signed)
 #   Contents/MacOS/lib/*.dylib               (bundled dylibs, signed)
 #   Contents/Resources/share/qemu/*          (firmware + descriptors + keymaps)
 
 set -euo pipefail
+
+case "$(uname -m)" in
+    arm64) QEMU_HOST_TARGET="aarch64" ;;
+    x86_64) QEMU_HOST_TARGET="x86_64" ;;
+    *)
+        echo "embed-qemu: unsupported host architecture: $(uname -m)" >&2
+        exit 1
+        ;;
+esac
 
 if [ -z "${TARGET_BUILD_DIR:-}" ] || [ -z "${WRAPPER_NAME:-}" ]; then
     echo "error: TARGET_BUILD_DIR / WRAPPER_NAME not set; run from Xcode" >&2
@@ -61,27 +70,29 @@ fi
 # Resolve the dist directory. Order: env override -> in-tree build -> pinned
 # tarball via fetch-qemu-dist.sh.
 DIST=""
-if [ -n "${QEMU_DIST_DIR:-}" ] && [ -f "${QEMU_DIST_DIR}/qemu-system-aarch64" ]; then
+if [ -n "${QEMU_DIST_DIR:-}" ] && [ -f "${QEMU_DIST_DIR}/qemu-system-$QEMU_HOST_TARGET" ]; then
     DIST="$QEMU_DIST_DIR"
     echo "embed-qemu: using QEMU_DIST_DIR override at $DIST"
-elif [ -f "$SRCROOT/../../dist/qemu-system-aarch64" ]; then
+elif [ -f "$SRCROOT/../../dist/qemu-system-$QEMU_HOST_TARGET" ]; then
     DIST="$SRCROOT/../../dist"
     echo "embed-qemu: using in-tree dist at $DIST"
 elif [ -x "$SRCROOT/scripts/fetch-qemu-dist.sh" ]; then
     echo "embed-qemu: no local dist; trying pinned tarball via fetch-qemu-dist.sh"
-    if FETCHED_DIST="$("$SRCROOT/scripts/fetch-qemu-dist.sh")"; then
+    if FETCHED_DIST="$(QEMU_DIST_TARGET="$QEMU_HOST_TARGET" \
+        "$SRCROOT/scripts/fetch-qemu-dist.sh")"; then
         DIST="$FETCHED_DIST"
     else
         echo "embed-qemu: fetch-qemu-dist.sh failed (continuing UI-only)" >&2
     fi
 fi
 
-if [ -z "$DIST" ] || [ ! -f "$DIST/qemu-system-aarch64" ]; then
+if [ -z "$DIST" ] || [ ! -f "$DIST/qemu-system-$QEMU_HOST_TARGET" ]; then
     cat >&2 <<EOF
-warning: no qemu dist available; skipping qemu embedding.
+warning: no QEMU dist for host target $QEMU_HOST_TARGET; skipping qemu embedding.
   Either:
-    - run ./contrib/apple-vfio/scripts/make-dist.sh from the qemu source
-      tree to produce a local dist/ at $SRCROOT/../../dist, or
+    - build qemu-system-$QEMU_HOST_TARGET and run
+      ./contrib/apple-vfio/scripts/make-dist.sh from the qemu source tree
+      to produce a local dist/ at $SRCROOT/../../dist, or
     - publish the pinned tarball described in
       contrib/apple-vfio/scripts/qemu-dist.pin so fetch-qemu-dist.sh can
       pull it.
@@ -90,8 +101,8 @@ EOF
     exit 0
 fi
 
-QEMU_BIN="$DIST/qemu-system-aarch64"
 QEMU_IMG_BIN="$DIST/qemu-img"
+QEMU_BINARIES=("$DIST/qemu-system-$QEMU_HOST_TARGET")
 
 if [ ! -f "$QEMU_IMG_BIN" ]; then
     cat >&2 <<EOF
@@ -129,9 +140,12 @@ if [ "$SIGN_ID" != "-" ]; then
     RUNTIME_OPT=(--options runtime)
 fi
 
-echo "embed-qemu: copying qemu-system-aarch64"
-cp -f "$QEMU_BIN" "$MACOS_DIR/qemu-system-aarch64"
-chmod u+w "$MACOS_DIR/qemu-system-aarch64"
+for binary in "${QEMU_BINARIES[@]}"; do
+    name="$(basename "$binary")"
+    echo "embed-qemu: copying $name"
+    cp -f "$binary" "$MACOS_DIR/$name"
+    chmod u+w "$MACOS_DIR/$name"
+done
 
 echo "embed-qemu: copying qemu-img"
 cp -f "$QEMU_IMG_BIN" "$MACOS_DIR/qemu-img"
@@ -151,6 +165,18 @@ if [ -d "$DIST/share/qemu" ]; then
     rsync -a --delete "$DIST/share/qemu/" "$SHARE_DIR/"
 fi
 
+if [ "$QEMU_HOST_TARGET" = "x86_64" ]; then
+    [ -f "$SHARE_DIR/edk2-x86_64-code.fd" ] || {
+        echo "error: QEMU dist lacks x86_64 UEFI code firmware" >&2
+        exit 1
+    }
+    if [ ! -f "$SHARE_DIR/edk2-i386-vars.fd" ] &&
+       [ ! -f "$SHARE_DIR/edk2-x86_64-vars.fd" ]; then
+        echo "error: QEMU dist lacks x86_64 UEFI vars firmware" >&2
+        exit 1
+    fi
+fi
+
 echo "embed-qemu: signing dylibs (identity: $SIGN_ID)"
 for dylib in "$LIB_DIR"/*.dylib; do
     [ -f "$dylib" ] || continue
@@ -161,10 +187,12 @@ echo "embed-qemu: signing qemu-img (identity: $SIGN_ID)"
 codesign --force --sign "$SIGN_ID" "${TS_OPT[@]}" "${RUNTIME_OPT[@]}" \
     "$MACOS_DIR/qemu-img"
 
-echo "embed-qemu: signing qemu-system-aarch64 (identity: $SIGN_ID, entitlements: hypervisor)"
-codesign --force --sign "$SIGN_ID" "${TS_OPT[@]}" "${RUNTIME_OPT[@]}" \
-    --entitlements "$ENTITLEMENTS" \
-    "$MACOS_DIR/qemu-system-aarch64"
+for binary in "${QEMU_BINARIES[@]}"; do
+    name="$(basename "$binary")"
+    echo "embed-qemu: signing $name (identity: $SIGN_ID, entitlements: hypervisor)"
+    codesign --force --sign "$SIGN_ID" "${TS_OPT[@]}" "${RUNTIME_OPT[@]}" \
+        --entitlements "$ENTITLEMENTS" "$MACOS_DIR/$name"
+done
 
 # Touch the app bundle so Xcode's outer codesign step re-walks it and
 # refreshes _CodeSignature/CodeResources to include the new files.
