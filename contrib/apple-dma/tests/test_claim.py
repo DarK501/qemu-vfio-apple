@@ -22,7 +22,8 @@ enum { kIOReturnSuccess = 0, kIOReturnBadArgument = 1,
 #define OS_LOG_DEFAULT 0
 #define os_log(...) ((void)0)
 #define OSDynamicCast(type, value) dynamic_cast<type *>(value)
-enum { kIOPCIConfigurationOffsetVendorID = 0, kIOPCIConfigurationOffsetDeviceID = 2 };
+enum { kIOPCIConfigurationOffsetVendorID = 0, kIOPCIConfigurationOffsetDeviceID = 2,
+       kIOPCIConfigurationOffsetCommand = 4 };
 struct IOService { virtual ~IOService() = default; };
 struct VFIOUserPCIDriverUserClient;
 struct IOPCIDevice {
@@ -92,27 +93,57 @@ int main()
     VFIOUserPCIDeviceIdentity identity = {};
     identity.vendorID = 0x1002; identity.deviceID = 0x731f;
 
+    uint64_t probe[3] = {};
+    assert(vfio_user_probe_pci_config(&c1, &driver, &identity, probe) == kIOReturnSuccess);
+    assert(probe[0] == 0x1002 && probe[1] == 0x731f && probe[2] == 0);
+    assert(pci.writes == 0 && pci.closes == 1 && !driver_vars.openerClient);
+    pci.vendor = 0xffff;
+    assert(vfio_user_probe_pci_config(&c1, &driver, &identity, probe) == kIOReturnNotReady);
+    assert(pci.writes == 0 && pci.closes == 2 && !driver_vars.openerClient);
+    pci.vendor = 0x1002;
+    driver_vars.claimBlocked = true;
+    assert(vfio_user_probe_pci_config(&c1, &driver, &identity, probe) == kIOReturnNotReady);
+    assert(pci.opens == 2 && !driver_vars.openerClient);
+    driver_vars.claimBlocked = false;
+    pci.fail_open = true;
+    assert(vfio_user_probe_pci_config(&c1, &driver, &identity, probe) == kIOReturnError);
+    assert(pci.closes == 3 && !driver_vars.openerClient && pci.writes == 0);
+    pci.fail_open = false;
+    pci.block_open = true;
+    int probe_result = -1;
+    std::thread probing([&] {
+        probe_result = vfio_user_probe_pci_config(&c1, &driver, &identity, probe);
+    });
+    while (!pci.in_open) { std::this_thread::yield(); }
+    assert(vfio_user_claim_device(&c2, &driver, &identity) == kIOReturnExclusiveAccess);
+    pci.open_continue = true;
+    probing.join();
+    assert(probe_result == kIOReturnSuccess && !driver_vars.openerClient);
+    pci.block_open = false; pci.in_open = false; pci.open_continue = false;
+    pci.opens = 0; pci.closes = 0;
+
     pci.fail_open = true;
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnError);
-    assert(!driver_vars.openerClient && !vars1.claimed);
+    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 1);
     pci.fail_open = false;
     pci.vendor = 0xffff;
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnNotReady);
-    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 1 && pci.writes == 0);
+    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 2 && pci.writes == 0);
     pci.vendor = 0x1002;
     pci.device = 0x1234;
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnNotReady);
-    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 2 && pci.writes == 0);
+    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 3 && pci.writes == 0);
     pci.device = 0x731f;
     pci.command = 0xffff;
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnNotReady);
-    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 3 && pci.writes == 0);
+    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 4 && pci.writes == 0);
     pci.command = 0;
     pci.block_open = true;
     int first_result = -1;
     std::thread first([&] { first_result = vfio_user_claim_device(&c1, &driver, &identity); });
     while (!pci.in_open) { std::this_thread::yield(); }
     assert(vfio_user_claim_device(&c2, &driver, &identity) == kIOReturnExclusiveAccess);
+    assert(vfio_user_probe_pci_config(&c2, &driver, &identity, probe) == kIOReturnExclusiveAccess);
     pci.open_continue = true;
     first.join();
     assert(first_result == kIOReturnSuccess && vfio_user_service_claimed(&c1));
@@ -120,7 +151,7 @@ int main()
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnSuccess);
     assert(pci.opens == 5);
     assert(vfio_user_release_claim(&c2) == kIOReturnSuccess);
-    assert(pci.closes == 3 && vfio_user_service_claimed(&c1));
+    assert(pci.closes == 4 && vfio_user_service_claimed(&c1));
 
     pci.block_close = true;
     int close_result = -1;
@@ -130,12 +161,12 @@ int main()
     pci.close_continue = true;
     closing.join();
     assert(close_result == kIOReturnSuccess);
-    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 4);
+    assert(!driver_vars.openerClient && !vars1.claimed && pci.closes == 5);
     pci.block_open = false;
     pci.block_close = false;
     assert(vfio_user_claim_device(&c2, &driver, &identity) == kIOReturnSuccess);
     assert(vfio_user_release_claim(&c2) == kIOReturnSuccess);
-    assert(!driver_vars.openerClient && pci.opens == 6 && pci.closes == 5);
+    assert(!driver_vars.openerClient && pci.opens == 6 && pci.closes == 6);
     driver_vars.claimBlocked = true;
     assert(vfio_user_claim_device(&c1, &driver, &identity) == kIOReturnNotReady);
     assert(!driver_vars.openerClient && !vars1.claimed && pci.opens == 6);

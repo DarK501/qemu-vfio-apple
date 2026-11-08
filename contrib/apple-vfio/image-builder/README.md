@@ -71,6 +71,17 @@ its state and do not establish device quiescence. The existing claim
 operation enables bus mastering: do not invoke it, run a guest using the
 physical device, or attempt DMA while the safety blocker remains.
 
+For an explicitly chosen device, the standalone `scripts/probe-pci-config.c`
+tool can request a one-shot live vendor/device/command read. It requires an
+exact BDF and vendor/device match and refuses ambiguous matches. Compile with
+`clang -std=c11 -Wall -Wextra -Werror -framework IOKit -framework CoreFoundation
+contrib/apple-vfio/scripts/probe-pci-config.c -o /tmp/vfio-probe-pci` from the
+repository root. Run `/tmp/vfio-probe-pci 44:00.0 1002:731f` only after
+checking the current BDF and device ID. This is not a read-only operation:
+DriverKit Open can map device memory, and Close can clear bus-master and memory
+enable bits. The probe does not set those bits, but they might already be set.
+It does not prove that the device is quiescent or that DMA is safe.
+
 The DMA companion must share the matching `vfio-apple-pci` connection; the
 normal `dma-companion=on` configuration creates it automatically. Standalone
 companions must be realized after their matching VFIO device, and a second

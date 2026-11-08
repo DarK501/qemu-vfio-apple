@@ -47,6 +47,7 @@ enum {
     kVFIOUserPCIDriverUserClientMethodWaitInterrupt = 15,
     kVFIOUserPCIDriverUserClientMethodSetIRQMask = 16,
     kVFIOUserPCIDriverUserClientMethodResetDevice = 17,
+    kVFIOUserPCIDriverUserClientMethodProbePCIConfig = 18,
 };
 
 enum {
@@ -440,6 +441,7 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
                (unsigned int)identity->bus,
                (unsigned int)identity->device,
                (unsigned int)identity->function, ret);
+        pciDevice->Close(client, 0);
         __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
         return ret;
     }
@@ -519,6 +521,61 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
     __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
     __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
     return kIOReturnSuccess;
+}
+
+static kern_return_t
+vfio_user_probe_pci_config(VFIOUserPCIDriverUserClient *client,
+                           IOService *service,
+                           const VFIOUserPCIDeviceIdentity *identity,
+                           uint64_t *output)
+{
+    if (client == nullptr || client->ivars == nullptr || service == nullptr ||
+        identity == nullptr || output == nullptr) {
+        return kIOReturnBadArgument;
+    }
+    VFIOUserPCIDriver *driver = OSDynamicCast(VFIOUserPCIDriver, service);
+    IOPCIDevice *pciDevice = vfio_user_get_pci_device(service);
+    if (driver == nullptr || driver->ivars == nullptr || pciDevice == nullptr) {
+        return kIOReturnNotAttached;
+    }
+    VFIOUserPCIDriverUserClient *expected = nullptr;
+    if (!__atomic_compare_exchange_n(&driver->ivars->openerClient, &expected,
+                                     client, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE)) {
+        return kIOReturnExclusiveAccess;
+    }
+    if (__atomic_load_n(&driver->ivars->claimBlocked, __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
+        return kIOReturnNotReady;
+    }
+
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe opening %02x:%02x.%u",
+           (unsigned int)identity->bus, (unsigned int)identity->device,
+           (unsigned int)identity->function);
+    kern_return_t ret = pciDevice->Open(client, 0);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe Open returned %#x", ret);
+    if (ret == kIOReturnSuccess) {
+        uint16_t vendor = 0xffff, device = 0xffff, command = 0xffff;
+        pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetVendorID, &vendor);
+        pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetDeviceID, &device);
+        pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetCommand, &command);
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: diagnostic probe config vendor=%04x device=%04x command=%04x",
+               (unsigned int)vendor, (unsigned int)device, (unsigned int)command);
+        if (vendor == 0xffff || device == 0xffff || command == 0xffff ||
+            vendor != identity->vendorID || device != identity->deviceID) {
+            ret = kIOReturnNotReady;
+        } else {
+            output[0] = vendor;
+            output[1] = device;
+            output[2] = command;
+        }
+    }
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe calling Close (may change PCI command bits)");
+    pciDevice->Close(client, 0);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: diagnostic probe Close returned; result=%#x", ret);
+    __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
+    return ret;
 }
 
 static kern_return_t
@@ -1828,11 +1885,31 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
 
     if (selector != kVFIOUserPCIDriverUserClientMethodGetIdentity &&
         selector != kVFIOUserPCIDriverUserClientMethodClaim &&
+        selector != kVFIOUserPCIDriverUserClientMethodProbePCIConfig &&
         !vfio_user_service_claimed(this)) {
         return kIOReturnNotOpen;
     }
 
     switch (selector) {
+    case kVFIOUserPCIDriverUserClientMethodProbePCIConfig:
+        if (arguments->scalarInput == nullptr || arguments->scalarInputCount != 5 ||
+            arguments->scalarOutput == nullptr || arguments->scalarOutputCount < 3) {
+            return kIOReturnBadArgument;
+        }
+        if (arguments->scalarInput[0] != identity.bus ||
+            arguments->scalarInput[1] != identity.device ||
+            arguments->scalarInput[2] != identity.function ||
+            arguments->scalarInput[3] != identity.vendorID ||
+            arguments->scalarInput[4] != identity.deviceID) {
+            return kIOReturnNotReady;
+        }
+        ret = vfio_user_probe_pci_config(this, driverService, &identity,
+                                          arguments->scalarOutput);
+        if (ret == kIOReturnSuccess) {
+            arguments->scalarOutputCount = 3;
+        }
+        return ret;
+
     case kVFIOUserPCIDriverUserClientMethodGetIdentity:
         if (arguments->scalarOutput == nullptr || arguments->scalarOutputCount < 6) {
             return kIOReturnBadArgument;
