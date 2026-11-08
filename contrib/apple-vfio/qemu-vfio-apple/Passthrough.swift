@@ -41,6 +41,7 @@ struct PassthroughCandidate {
     let deviceId: UInt16
     let classCode: UInt32     // full 3-byte PCI class code (base<<16 | sub<<8 | prog)
     let description: String
+    var externalGraphicsServices: Bool = false
 
     /// vfio-apple-pci host= syntax, e.g. "43:00.0".
     var hostBDF: String {
@@ -215,7 +216,10 @@ private func collectDextBoundPCIDevices() -> [PassthroughCandidate] {
         result.append(PassthroughCandidate(
             bus: bus, device: device, function: function,
             vendor: vendor, deviceId: dvId,
-            classCode: cls, description: desc
+            classCode: cls, description: desc,
+            externalGraphicsServices: hasExternalAMDGraphicsServices(
+                classCode: cls, tunnelled: (dict["IOPCITunnelled"] as? Bool) == true,
+                driver: driverStateForPciDevice(dev))
         ))
     }
     return result

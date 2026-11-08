@@ -327,7 +327,13 @@ func launchVM(base: URL, opts: Options) throws {
         log("passthrough: \(passthrough.count) function(s) on slot \(passthrough[0].slotString)")
         for c in passthrough {
             log("  function \(c.function): \(c.description)")
+            if c.externalGraphicsServices {
+                for line in externalGraphicsAdvisory(bdf: c.hostBDF) {
+                    warn(line)
+                }
+            }
         }
+        warn("A VFIO service match does not prove exclusive access; physical-device DMA is unsafe until guest DMA interception is fixed.")
     }
 
     let qemuArgv = buildQemuArgv(opts: opts,

@@ -16,13 +16,6 @@ import IOKit
 
 // MARK: - Model
 
-enum DriverState {
-    case ours([String])    // dext matched; other direct services may coexist
-    case other(String)     // other attached service names
-    case none              // no driver attached
-    case unknown           // registry traversal failed
-}
-
 struct PciEntry {
     let bdf: String        // e.g. "03:00.0" — what host=<BDF> matches on
     let root: String       // root-port registry name, e.g. "pcic1-bridge"
@@ -31,6 +24,7 @@ struct PciEntry {
     let subVendor: UInt16
     let subDevice: UInt16
     let classCode: UInt32  // bits 0..23 of the PCI 0x08 register: prog | sub<<8 | base<<16
+    let tunnelled: Bool
     let name: String
     let driver: DriverState
 }
@@ -110,6 +104,15 @@ func cmdListDevices() -> Int32 {
         for line in wrap(details, width: bodyWidth) {
             print("\(indent)\(line)")
         }
+        if hasExternalAMDGraphicsServices(classCode: e.classCode,
+                                          tunnelled: e.tunnelled,
+                                          driver: e.driver) {
+            for line in externalGraphicsAdvisory(bdf: e.bdf) {
+                for wrapped in wrap(line, width: bodyWidth) {
+                    print("\(indent)\(wrapped)")
+                }
+            }
+        }
     }
     print("")
     if db == nil {
@@ -137,7 +140,7 @@ private func driverDisplay(_ state: DriverState) -> String {
     case .ours(let names):
         return names.isEmpty ? "vfio-user (matched)" :
             "vfio-user (matched); other services: \(names.joined(separator: ", "))"
-    case .other(let cls): return cls
+    case .other(let names): return names.joined(separator: ", ")
     case .none:           return "(unbound)"
     case .unknown:        return "(service lookup failed)"
     }
@@ -242,6 +245,7 @@ private func collectPciDevices() -> [PciEntry]? {
         let subVend  = readU16Property(dict["subsystem-vendor-id"])
         let subDev   = readU16Property(dict["subsystem-id"])
         let cls      = readU32Property(dict["class-code"])
+        let tunnelled = (dict["IOPCITunnelled"] as? Bool) == true
         let driver   = driverStateForPciDevice(dev)
 
         // Name priority: device-tree `name` ("wlan", "bluetooth-pcie") →
@@ -270,6 +274,7 @@ private func collectPciDevices() -> [PciEntry]? {
             subVendor: subVend,
             subDevice: subDev,
             classCode: cls,
+            tunnelled: tunnelled,
             name: name,
             driver: driver
         ))
@@ -333,7 +338,7 @@ private func isIOPCIDevice(_ obj: io_object_t) -> Bool {
 }
 
 /// List direct services without interpreting a VFIO match as exclusive ownership.
-private func driverStateForPciDevice(_ pciDev: io_object_t) -> DriverState {
+func driverStateForPciDevice(_ pciDev: io_object_t) -> DriverState {
     var iter: io_iterator_t = 0
     guard IORegistryEntryGetChildIterator(pciDev, kIOServicePlane, &iter) == KERN_SUCCESS else {
         return .unknown
@@ -371,7 +376,7 @@ private func driverStateForPciDevice(_ pciDev: io_object_t) -> DriverState {
     }
 
     if ours { return .ours(otherNames) }
-    if !otherNames.isEmpty { return .other(otherNames.joined(separator: ", ")) }
+    if !otherNames.isEmpty { return .other(otherNames) }
     return .none
 }
 

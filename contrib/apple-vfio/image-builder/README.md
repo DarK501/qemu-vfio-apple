@@ -64,6 +64,15 @@ identify which kernel code acquired a leaked lock, and neither an activated
 extension nor a registered service proves exclusive access. `list-devices`
 shows other direct services alongside a VFIO match; their presence does not
 by itself identify the owner of the PCI open session.
+For a PCI-tunnelled display device with recognizable AMD graphics services,
+`list-devices` and the launcher suggest closing applications using the eGPU
+and, if safe, using the menu bar eGPU disconnect action before checking the
+device list again. This is advisory: service names do not prove the GPU is
+accelerating the internal display or identify the exclusive-open owner.
+Disconnecting may remove the GPU from the PCI registry altogether, rather
+than leave it available to VFIO; reconnecting may cause macOS to bind it again.
+It can interrupt applications or external displays and does not establish
+isolation, exclusive access, or DMA safety.
 The PCI-matching extension can be started by macOS without a QEMU claim and
 its startup reads identity from PCI registry properties and queries BAR
 metadata, not live configuration space. A normal claim opens the PCI device
