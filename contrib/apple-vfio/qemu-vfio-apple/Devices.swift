@@ -1,6 +1,5 @@
 // Devices.swift — `list-devices` subcommand: enumerate every PCI
-// endpoint the host sees, show which driver has claimed each one,
-// and tell the user which can be used with `-device vfio-apple-pci`.
+// endpoint the host sees and show its directly attached services.
 //
 // Data source is IOKit (IOPCIDevice). We walk the service tree, group
 // each device by its root port, and annotate the rows with readable
@@ -18,9 +17,10 @@ import IOKit
 // MARK: - Model
 
 enum DriverState {
-    case ours              // matched by VFIOUserPCIDriver — ready for vfio-pci
-    case other(String)     // matched by another driver (kext or dext class name)
+    case ours([String])    // dext matched; other direct services may coexist
+    case other(String)     // other attached service names
     case none              // no driver attached
+    case unknown           // registry traversal failed
 }
 
 struct PciEntry {
@@ -118,13 +118,8 @@ func cmdListDevices() -> Int32 {
         print("")
     }
     if anyOurs {
-        print("[*] = bound to vfio-user; pass through with:")
-        if anyCollision {
-            print("        qemu-system-<host-arch> ... \\")
-            print("            -device vfio-apple-pci,host=<BDF>,host-root=<ROOT>")
-        } else {
-            print("        qemu-system-<host-arch> ... -device vfio-apple-pci,host=<BDF>")
-        }
+        print("[*] = VFIO service matched; this does not prove exclusive access.")
+        print("      Other services shown may still use the device.")
     }
     if anyCollision {
         print("")
@@ -132,18 +127,19 @@ func cmdListDevices() -> Int32 {
         print("      `host-root=<ROOT>` (shown in the detail line) to disambiguate.")
     }
     print("")
-    print("Only devices bound to vfio-user can be passed through. macOS doesn't")
-    print("let you detach Apple's built-in drivers at runtime, so to add another")
-    print("device you have to extend the dext's IOKitPersonalities match list")
-    print("(by vendor/device id) and rebuild + reinstall the driver.")
+    print("A VFIO match is necessary but does not guarantee a successful claim.")
+    print("Physical-device DMA remains unsafe until guest DMA interception is fixed.")
     return 0
 }
 
 private func driverDisplay(_ state: DriverState) -> String {
     switch state {
-    case .ours:           return "vfio-user (this driver)"
+    case .ours(let names):
+        return names.isEmpty ? "vfio-user (matched)" :
+            "vfio-user (matched); other services: \(names.joined(separator: ", "))"
     case .other(let cls): return cls
     case .none:           return "(unbound)"
+    case .unknown:        return "(service lookup failed)"
     }
 }
 
@@ -336,26 +332,15 @@ private func isIOPCIDevice(_ obj: io_object_t) -> Bool {
     return String(cString: name) == "IOPCIDevice"
 }
 
-/// Walk the IOService-plane children of a PCI device to figure out which
-/// driver (if any) has matched it. A device has at most one matched driver
-/// in practice, but we tolerate multiple children and prefer ours when seen.
-///
-/// Detection rules:
-///   - `CFBundleIdentifier == kDextBundleID` on a child → ours (DriverKit
-///     dexts publish their bundle id this way).
-///   - Registry-entry name matches the dext class → ours (fallback for
-///     when the property dictionary doesn't carry the bundle id).
-///   - Any other child → `.other(<registry name>)`. We use the registry
-///     name (e.g. `AppleBCMWLANBusInterfacePCIe`, `AppleUSBXHCITR`) since
-///     it's the most user-recognisable label IOKit exposes.
+/// List direct services without interpreting a VFIO match as exclusive ownership.
 private func driverStateForPciDevice(_ pciDev: io_object_t) -> DriverState {
     var iter: io_iterator_t = 0
     guard IORegistryEntryGetChildIterator(pciDev, kIOServicePlane, &iter) == KERN_SUCCESS else {
-        return .none
+        return .unknown
     }
     defer { IOObjectRelease(iter) }
 
-    var firstName: String? = nil
+    var otherNames: [String] = []
     var ours = false
     var child = IOIteratorNext(iter)
     while child != 0 {
@@ -364,23 +349,29 @@ private func driverStateForPciDevice(_ pciDev: io_object_t) -> DriverState {
             child = IOIteratorNext(iter)
         }
 
+        var isOurs = false
         var unmanaged: Unmanaged<CFMutableDictionary>?
         if IORegistryEntryCreateCFProperties(child, &unmanaged, kCFAllocatorDefault, 0) == KERN_SUCCESS,
            let dict = unmanaged?.takeRetainedValue() as? [String: Any]
         {
             if let bid = dict["CFBundleIdentifier"] as? String, bid == kDextBundleID {
-                ours = true
+                isOurs = true
             }
         }
 
-        if let name = ioRegistryName(child), !name.isEmpty {
-            if firstName == nil { firstName = name }
-            if name == "VFIOUserPCIDriver" { ours = true }
+        let name = ioRegistryName(child)
+        if name == "VFIOUserPCIDriver" { isOurs = true }
+        if isOurs {
+            ours = true
+        } else if let name = name, !name.isEmpty, !otherNames.contains(name) {
+            otherNames.append(name)
+        } else if name == nil || name?.isEmpty == true {
+            otherNames.append("(unnamed service)")
         }
     }
 
-    if ours { return .ours }
-    if let name = firstName { return .other(name) }
+    if ours { return .ours(otherNames) }
+    if !otherNames.isEmpty { return .other(otherNames.joined(separator: ", ")) }
     return .none
 }
 

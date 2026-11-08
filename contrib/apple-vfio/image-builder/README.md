@@ -61,7 +61,9 @@ sudo log show --last 15m --info --style compact \
 Review the file for sensitive information before sharing. Logs can be lost
 during a panic; retain the panic report as well. These diagnostics do not
 identify which kernel code acquired a leaked lock, and neither an activated
-extension nor a registered service proves that PCI attachment succeeded.
+extension nor a registered service proves exclusive access. `list-devices`
+shows other direct services alongside a VFIO match; their presence does not
+by itself identify the owner of the PCI open session.
 The PCI-matching extension can be started by macOS without a QEMU claim and
 its startup reads identity from PCI registry properties and queries BAR
 metadata, not live configuration space. A normal claim opens the PCI device
