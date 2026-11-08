@@ -37,6 +37,36 @@ than host device addresses. This is an unresolved correctness and safety
 blocker: do not use this path for physical device DMA until the wrapper is
 redesigned and validated for concurrent calls.
 
+### macOS lifecycle diagnostics
+
+The host app logs extension requests and observed state changes under unified
+logging subsystem `uk.co.hitwithwrench.vfio`, category `extension`. DriverKit
+service and user-client lifecycle messages use the `vfio-user-dext:` prefix.
+To additionally log the start, PID and exit of each two-second status poll,
+launch the signed app executable with `VFIO_TRACE_POLLING=1`:
+
+```sh
+VFIO_TRACE_POLLING=1 /Applications/VFIOUserHostApp.app/Contents/MacOS/VFIOUserHostApp
+```
+
+After an incident, export the relevant recent messages, adjusting the time
+window as needed:
+
+```sh
+sudo log show --last 15m --info --style compact \
+  --predicate 'subsystem == "uk.co.hitwithwrench.vfio" OR process == "kernelmanagerd" OR process == "sysextd" OR eventMessage CONTAINS[c] "vfio-user-dext"' \
+  > ~/Desktop/vfio-lifecycle.log
+```
+
+Review the file for sensitive information before sharing. Logs can be lost
+during a panic; retain the panic report as well. These diagnostics do not
+identify which kernel code acquired a leaked lock, and neither an activated
+extension nor a registered service proves that PCI attachment succeeded.
+The PCI-matching extension can be started by macOS without a QEMU claim and
+its startup reads PCI configuration and BAR metadata. The existing claim
+operation enables bus mastering: do not invoke it, run a guest using the
+physical device, or attempt DMA while the safety blocker remains.
+
 The DMA companion must share the matching `vfio-apple-pci` connection; the
 normal `dma-companion=on` configuration creates it automatically. Standalone
 companions must be realized after their matching VFIO device, and a second

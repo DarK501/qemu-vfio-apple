@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import os
 import SystemExtensions
 
 @MainActor
@@ -26,6 +27,9 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
     private var currentRequestKind: RequestKind?
     private var pendingActivationHandler: (() -> Void)?
     private var pendingDeactivationHandler: (() -> Void)?
+    private let logger = Logger(subsystem: "uk.co.hitwithwrench.vfio", category: "extension")
+    private let tracePolling = ProcessInfo.processInfo.environment["VFIO_TRACE_POLLING"] == "1"
+    private var lastRuntimeState: RuntimeState?
 
     override init() {
         // Bundle.main.bundleIdentifier is always set for a properly built
@@ -36,6 +40,7 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
         let appBundleID = Bundle.main.bundleIdentifier!
         self.extensionIdentifier = appBundleID + ".VFIOUserPCIDriver"
         super.init()
+        logger.notice("Extension manager started; identifier=\(self.extensionIdentifier, privacy: .public) pid=\(ProcessInfo.processInfo.processIdentifier) pollingTrace=\(self.tracePolling)")
         refreshExtensionActiveState()
     }
 
@@ -70,6 +75,10 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
 
     func refreshExtensionActiveState() {
         let runtime = querySystemExtensionRuntimeState()
+        if runtime != lastRuntimeState {
+            logger.notice("Extension runtime state changed: \(runtime.description, privacy: .public)")
+            lastRuntimeState = runtime
+        }
         switch runtime {
         case .enabled:
             isExtensionKnownActive = true
@@ -100,13 +109,22 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
         }
     }
 
-    private enum RuntimeState {
+    private enum RuntimeState: Equatable {
         case notInstalled
         case waitingForApproval
         case enabled
         /// Some other system-extension state we don't model (e.g. terminated,
         /// replacing). Reported verbatim in the bracketed `[state]` column.
         case otherStaged(String)
+
+        var description: String {
+            switch self {
+            case .notInstalled: return "not installed"
+            case .waitingForApproval: return "waiting for approval"
+            case .enabled: return "enabled"
+            case .otherStaged(let state): return "other: \(state)"
+            }
+        }
     }
 
     /// Shells out to `systemextensionsctl list` and looks for the line
@@ -122,15 +140,29 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
         task.standardError = stderr
         task.standardInput = FileHandle(forReadingAtPath: "/dev/null")
 
+        if tracePolling {
+            logger.notice("systemextensionsctl list starting")
+        }
         do {
             try task.run()
         } catch {
+            logger.error("systemextensionsctl launch failed: \(error.localizedDescription, privacy: .public)")
             return .notInstalled
         }
+        if tracePolling {
+            logger.notice("systemextensionsctl launched pid=\(task.processIdentifier)")
+        }
         task.waitUntilExit()
+        if tracePolling {
+            logger.notice("systemextensionsctl exited pid=\(task.processIdentifier) status=\(task.terminationStatus)")
+        }
+        if task.terminationStatus != 0 {
+            logger.error("systemextensionsctl exited with status \(task.terminationStatus)")
+        }
 
         let data = stdout.fileHandleForReading.readDataToEndOfFile()
         guard let output = String(data: data, encoding: .utf8) else {
+            logger.error("systemextensionsctl returned non-UTF-8 output")
             return .notInstalled
         }
 
@@ -180,6 +212,7 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
     }
 
     private func submitActivationRequest(message: String) {
+        logger.notice("Submitting activation for \(self.extensionIdentifier, privacy: .public)")
         requestInFlight = true
         currentRequestKind = .activation
         statusMessage = message
@@ -193,6 +226,7 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
     }
 
     private func submitDeactivationRequest(message: String) {
+        logger.notice("Submitting deactivation for \(self.extensionIdentifier, privacy: .public)")
         requestInFlight = true
         currentRequestKind = .deactivation
         statusMessage = message
@@ -208,6 +242,7 @@ final class SystemExtensionActivationManager: NSObject, ObservableObject {
 
 extension SystemExtensionActivationManager: OSSystemExtensionRequestDelegate {
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
+        logger.notice("Extension request needs user approval")
         // The dext is staged in /Library/SystemExtensions but won't load
         // until the user enables it in System Settings. Surface that in the
         // UI immediately rather than waiting for the next polling tick.
@@ -220,6 +255,7 @@ extension SystemExtensionActivationManager: OSSystemExtensionRequestDelegate {
         actionForReplacingExtension existing: OSSystemExtensionProperties,
         withExtension ext: OSSystemExtensionProperties
     ) -> OSSystemExtensionRequest.ReplacementAction {
+        logger.notice("Extension replacement requested")
         statusMessage = "Replacing an existing system extension with the bundled version."
         return .replace
     }
@@ -228,6 +264,8 @@ extension SystemExtensionActivationManager: OSSystemExtensionRequestDelegate {
         _ request: OSSystemExtensionRequest,
         didFinishWithResult result: OSSystemExtensionRequest.Result
     ) {
+        let kind = currentRequestKind.map { String(describing: $0) } ?? "unknown"
+        logger.notice("Extension request finished kind=\(kind, privacy: .public) result=\(result.rawValue)")
         switch currentRequestKind {
         case .deactivation:
             switch result {
@@ -289,6 +327,9 @@ extension SystemExtensionActivationManager: OSSystemExtensionRequestDelegate {
     }
 
     func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
+        let kind = currentRequestKind.map { String(describing: $0) } ?? "unknown"
+        let nsError = error as NSError
+        logger.error("Extension request failed kind=\(kind, privacy: .public) domain=\(nsError.domain, privacy: .public) code=\(nsError.code) description=\(nsError.localizedDescription, privacy: .public)")
         requestInFlight = false
         currentRequestKind = nil
         pendingActivationHandler = nil

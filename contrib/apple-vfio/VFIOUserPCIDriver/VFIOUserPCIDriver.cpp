@@ -382,7 +382,11 @@ vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
         return kIOReturnNotReady;
     }
 
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: claim opening PCI device %02x:%02x.%u (enables bus mastering after open)",
+           (unsigned int)identity->bus, (unsigned int)identity->device,
+           (unsigned int)identity->function);
     ret = pciDevice->Open(client, 0);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: claim PCI Open returned %#x", ret);
     if (ret != kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: failed to open PCI device for %02x:%02x.%u: %#x",
@@ -1200,7 +1204,9 @@ vfio_user_mmio_write(VFIOUserPCIDriverUserClient *client,
 kern_return_t
 IMPL(VFIOUserPCIDriver, Start)
 {
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start entered; calling super");
     kern_return_t ret = Start(provider, SUPERDISPATCH);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service super Start returned %#x", ret);
     if (ret != kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT, "vfio-user-dext: super Start failed: %#x", ret);
         return ret;
@@ -1208,11 +1214,14 @@ IMPL(VFIOUserPCIDriver, Start)
 
     ivars = IONewZero(VFIOUserPCIDriver_IVars, 1);
     if (ivars == nullptr) {
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start allocation failed");
         return kIOReturnNoMemory;
     }
 
     VFIOUserPCIDeviceIdentity identity;
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start reading PCI identity");
     ret = vfio_user_read_identity(this, &identity);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start identity returned %#x", ret);
     if (ret != kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT, "vfio-user-dext: failed to read PCI identity: %#x", ret);
         IOSafeDeleteNULL(ivars, VFIOUserPCIDriver_IVars, 1);
@@ -1230,6 +1239,7 @@ IMPL(VFIOUserPCIDriver, Start)
     uint16_t status = 0xffff;
     uint8_t headerType = 0xff;
 
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start reading PCI command/status/header");
     pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetCommand, &command);
     pciDevice->ConfigurationRead16(kIOPCIConfigurationOffsetStatus, &status);
     pciDevice->ConfigurationRead8(kIOPCIConfigurationOffsetHeaderType, &headerType);
@@ -1251,7 +1261,10 @@ IMPL(VFIOUserPCIDriver, Start)
         uint64_t barSize = 0;
         uint8_t barType = 0;
 
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start querying BAR%u", (unsigned int)bar);
         kern_return_t barRet = pciDevice->GetBARInfo(bar, &memoryIndex, &barSize, &barType);
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start BAR%u returned %#x",
+               (unsigned int)bar, barRet);
         if (barRet == kIOReturnSuccess) {
             os_log(OS_LOG_DEFAULT,
                    "vfio-user-dext: BAR%u memoryIndex=%u size=%llu type=%{public}s",
@@ -1262,13 +1275,16 @@ IMPL(VFIOUserPCIDriver, Start)
         }
     }
 
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start calling RegisterService");
     RegisterService();
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start registered; returning success");
     return kIOReturnSuccess;
 }
 
 kern_return_t
 IMPL(VFIOUserPCIDriver, NewUserClient)
 {
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: NewUserClient entered type=%u", type);
     if (type != 0) {
         os_log(OS_LOG_DEFAULT, "vfio-user-dext: unsupported user-client type %u", type);
         return kIOReturnUnsupported;
@@ -1289,12 +1305,14 @@ IMPL(VFIOUserPCIDriver, NewUserClient)
     }
 
     *userClient = typedClient;
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: NewUserClient returning success");
     return kIOReturnSuccess;
 }
 
 kern_return_t
 IMPL(VFIOUserPCIDriver, Stop)
 {
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop entered");
     if (ivars != nullptr &&
         __atomic_load_n(&ivars->openerClient, __ATOMIC_ACQUIRE) != nullptr) {
         os_log(OS_LOG_DEFAULT,
@@ -1303,13 +1321,18 @@ IMPL(VFIOUserPCIDriver, Stop)
         return kIOReturnStillOpen;
     }
     IOSafeDeleteNULL(ivars, VFIOUserPCIDriver_IVars, 1);
-    return Stop(provider, SUPERDISPATCH);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop calling super");
+    kern_return_t ret = Stop(provider, SUPERDISPATCH);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: service super Stop returned %#x", ret);
+    return ret;
 }
 
 kern_return_t
 IMPL(VFIOUserPCIDriverUserClient, Start)
 {
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client Start entered; calling super");
     kern_return_t ret = Start(provider, SUPERDISPATCH);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client super Start returned %#x", ret);
     if (ret != kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client super Start failed: %#x", ret);
         return ret;
@@ -1322,9 +1345,11 @@ IMPL(VFIOUserPCIDriverUserClient, Start)
 
     ivars = IONewZero(VFIOUserPCIDriverUserClient_IVars, 1);
     if (ivars == nullptr) {
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client Start allocation failed");
         return kIOReturnNoMemory;
     }
 
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client Start returning success");
     return kIOReturnSuccess;
 }
 
@@ -1334,6 +1359,7 @@ vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *);
 kern_return_t
 IMPL(VFIOUserPCIDriverUserClient, Stop)
 {
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client Stop entered");
     if (ivars != nullptr &&
         (ivars->activeDMARegionCount != 0 || ivars->dmaCompleteFailureCount != 0)) {
         vfio_user_dma_log(
@@ -1397,7 +1423,10 @@ IMPL(VFIOUserPCIDriverUserClient, Stop)
     }
 
     IOSafeDeleteNULL(ivars, VFIOUserPCIDriverUserClient_IVars, 1);
-    return Stop(provider, SUPERDISPATCH);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client Stop calling super");
+    kern_return_t ret = Stop(provider, SUPERDISPATCH);
+    os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client super Stop returned %#x", ret);
+    return ret;
 }
 
 static kern_return_t
