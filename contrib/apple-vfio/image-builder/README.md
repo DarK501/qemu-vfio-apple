@@ -156,8 +156,19 @@ that lack x86 BIOS and VGA ROMs.
 
 The output directory is architecture-specific by default:
 `out/ubuntu-desktop-image` for arm64 and
-`out/ubuntu-desktop-image-x86_64` for x86_64. Re-running a builder reuses its
-directory and refreshes that architecture's artifact.
+`out/ubuntu-desktop-image-x86_64` for x86_64. The builder does not overwrite
+an existing build disk, artifact, or manifest. Choose a different output
+directory for a fresh build.
+
+If provisioning completed and the guest powered down but the artifact is
+missing, rerun the same builder command with the same `GUEST_ARCH`,
+`IMAGE_NAME`, output directory, and `QEMU_IMG_BIN`. It detects the build disk,
+checks the log for both the completion marker and `reboot: Power down`, checks
+the qcow2 with `qemu-img`, and converts it without booting the guest again.
+Make sure the VM is stopped first. Recovery does not create a manifest because
+the original build settings cannot be verified; it will refuse to overwrite an
+existing image or manifest. If the shutdown marker or disk check is missing or
+fails, recovery stops without modifying the build disk.
 
 To override defaults:
 

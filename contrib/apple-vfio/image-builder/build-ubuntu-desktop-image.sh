@@ -122,6 +122,15 @@ need_tool() {
     command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"
 }
 
+resolve_qemu_img() {
+    if [ -z "$QEMU_IMG_BIN" ]; then
+        QEMU_IMG_BIN="$(pick_existing \
+            "$REPO_ROOT/dist/qemu-img" \
+            "$REPO_ROOT/build/qemu-img" \
+        )" || die "qemu-img not found in dist/ or build/; set QEMU_IMG_BIN"
+    fi
+}
+
 ensure_inputs() {
     need_tool curl
     need_tool hdiutil
@@ -135,12 +144,7 @@ ensure_inputs() {
         )" || die "qemu-system-$QEMU_TARGET not found in dist/ or build/"
     fi
 
-    if [ -z "$QEMU_IMG_BIN" ]; then
-        QEMU_IMG_BIN="$(pick_existing \
-            "$REPO_ROOT/dist/qemu-img" \
-            "$REPO_ROOT/build/qemu-img" \
-        )" || die "qemu-img not found in dist/ or build/"
-    fi
+    resolve_qemu_img
 
     if [ -z "$QEMU_DATA_DIR" ]; then
         QEMU_DATA_DIR="$(pick_existing \
@@ -189,7 +193,7 @@ download_base_image() {
 }
 
 prepare_build_disk() {
-    rm -f "$BUILD_DISK"
+    [ ! -e "$BUILD_DISK" ] || die "build disk already exists: $BUILD_DISK"
     log "creating build disk: $BUILD_DISK"
     "$QEMU_IMG_BIN" create -f qcow2 \
         -b "$BASE_IMAGE_PATH" -F qcow2 \
@@ -293,7 +297,7 @@ PY
 run_builder_vm() {
     rm -f "$BUILD_LOG"
     log "booting builder VM"
-    "$QEMU_BIN" \
+    if "$QEMU_BIN" \
         -L "$QEMU_DATA_DIR" \
         -accel hvf \
         -cpu host \
@@ -309,7 +313,12 @@ run_builder_vm() {
         -drive if=virtio,format=raw,readonly=on,file="$SEED_ISO" \
         -netdev user,id=net0 \
         -device virtio-net-pci,netdev=net0 \
-        2>&1 | tee "$BUILD_LOG"
+        2>&1 | tee "$BUILD_LOG"; then
+        return 0
+    else
+        local -a pipeline_status=("${PIPESTATUS[@]}")
+        die "builder VM or log writer failed (QEMU=${pipeline_status[0]}, tee=${pipeline_status[1]}); inspect $BUILD_LOG. The build disk was retained; rerun to recover after a confirmed guest shutdown"
+    fi
 }
 
 assert_success_log() {
@@ -319,9 +328,46 @@ assert_success_log() {
 }
 
 emit_artifact() {
-    rm -f "$FINAL_IMAGE"
+    local temporary_image
+
+    [ ! -e "$FINAL_IMAGE" ] || die "artifact already exists: $FINAL_IMAGE"
     log "flattening build disk into artifact"
-    "$QEMU_IMG_BIN" convert -p -O qcow2 -c "$BUILD_DISK" "$FINAL_IMAGE"
+    temporary_image="$(mktemp "$ARTIFACT_DIR/.${IMAGE_NAME}.qcow2.XXXXXX")" ||
+        die "cannot create temporary image in $ARTIFACT_DIR"
+    if ! "$QEMU_IMG_BIN" convert -p -O qcow2 -c "$BUILD_DISK" "$temporary_image"; then
+        rm -f "$temporary_image"
+        die "image conversion failed; retained build disk at $BUILD_DISK"
+    fi
+    if [ ! -s "$temporary_image" ] ||
+       ! "$QEMU_IMG_BIN" check -f qcow2 "$temporary_image"; then
+        rm -f "$temporary_image"
+        die "converted image is missing or invalid; retained build disk at $BUILD_DISK"
+    fi
+    if ! ln "$temporary_image" "$FINAL_IMAGE"; then
+        rm -f "$temporary_image"
+        die "cannot publish artifact (it may already exist): $FINAL_IMAGE"
+    fi
+    rm -f "$temporary_image"
+    [ -s "$FINAL_IMAGE" ] || die "published artifact is missing or empty: $FINAL_IMAGE"
+}
+
+recover_build_disk() {
+    [ ! -e "$FINAL_IMAGE" ] ||
+        die "build disk and artifact already exist; refusing to overwrite either: $FINAL_IMAGE"
+    [ ! -e "$MANIFEST_PATH" ] ||
+        die "manifest already exists without an artifact; inspect $MANIFEST_PATH before recovery"
+    [ -s "$BUILD_LOG" ] || die "build disk exists but its build log is missing: $BUILD_LOG"
+    assert_success_log
+    grep -q 'reboot: Power down' "$BUILD_LOG" ||
+        die "guest shutdown is not confirmed in $BUILD_LOG; refusing to convert $BUILD_DISK"
+    resolve_qemu_img
+    mkdir -p "$ARTIFACT_DIR"
+    log "checking existing build disk before recovery"
+    "$QEMU_IMG_BIN" check -f qcow2 "$BUILD_DISK" ||
+        die "build disk check failed; ensure the VM is stopped and inspect $BUILD_DISK"
+    emit_artifact
+    log "artifact recovered: $FINAL_IMAGE"
+    log "no manifest was generated: original build settings cannot be verified"
 }
 
 write_manifest() {
@@ -357,6 +403,14 @@ PY
 }
 
 main() {
+    if [ -e "$BUILD_DISK" ]; then
+        recover_build_disk
+        return
+    fi
+    [ ! -e "$FINAL_IMAGE" ] ||
+        die "artifact already exists; refusing to overwrite it: $FINAL_IMAGE"
+    [ ! -e "$MANIFEST_PATH" ] ||
+        die "manifest already exists; refusing to overwrite it: $MANIFEST_PATH"
     ensure_inputs
     prepare_dirs
     download_base_image
