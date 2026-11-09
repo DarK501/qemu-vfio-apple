@@ -24,6 +24,8 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/rcupdate.h>
+#include <linux/srcu.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -231,6 +233,7 @@ struct apple_dma_dev {
 	u16 managed_bdf;
 	u32 max_entries;
 	bool ready;
+	bool hooked;		/* dma_ops hook installed on managed_pdev */
 	atomic_t map_count;	/* number of active mappings */
 	atomic64_t map_bytes;	/* total bytes currently mapped */
 
@@ -257,6 +260,13 @@ struct apple_dma_dev {
 
 static LIST_HEAD(apple_dma_instances);
 static DEFINE_MUTEX(instances_lock);
+
+/*
+ * Every dma_map_ops callback runs inside an SRCU read section (callbacks may
+ * sleep).  Teardown unpublishes the instance, then waits for the section to
+ * drain before freeing anything the callbacks use.
+ */
+DEFINE_STATIC_SRCU(apple_dma_srcu);
 
 #ifdef CONFIG_ARM64
 /* Global quirk reference counts — quirks are applied once system-wide */
@@ -294,19 +304,26 @@ static struct apple_dma_dev *apple_dma_find_by_dev(struct device *dev)
 {
 	struct apple_dma_dev *ad;
 
-	list_for_each_entry(ad, &apple_dma_instances, instance_node) {
-		if (&ad->managed_pdev->dev == dev)
+	rcu_read_lock();
+	list_for_each_entry_rcu(ad, &apple_dma_instances, instance_node) {
+		if (&ad->managed_pdev->dev == dev) {
+			rcu_read_unlock();
 			return ad;
+		}
 	}
+	rcu_read_unlock();
 	return NULL;
 }
 
 struct apple_dma_dev *apple_dma_get(void)
 {
-	if (list_empty(&apple_dma_instances))
-		return NULL;
-	return list_first_entry(&apple_dma_instances,
-				struct apple_dma_dev, instance_node);
+	struct apple_dma_dev *ad;
+
+	rcu_read_lock();
+	ad = list_first_or_null_rcu(&apple_dma_instances,
+				    struct apple_dma_dev, instance_node);
+	rcu_read_unlock();
+	return ad;
 }
 
 void apple_dma_trace_get_counts(struct apple_dma_dev *ad, u32 *maps,
@@ -331,11 +348,13 @@ void apple_dma_trace_get_total_counts(u32 *maps, u64 *bytes,
 	u64 b = 0;
 	u32 w = 0;
 
-	list_for_each_entry(ad, &apple_dma_instances, instance_node) {
+	rcu_read_lock();
+	list_for_each_entry_rcu(ad, &apple_dma_instances, instance_node) {
 		m += (u32)atomic_read(&ad->map_count);
 		b += (u64)atomic64_read(&ad->map_bytes);
 		w += ad->window_count;
 	}
+	rcu_read_unlock();
 	if (maps)
 		*maps = m;
 	if (bytes)
@@ -1741,24 +1760,108 @@ static void apple_dma_sync_sg_for_device(struct device *dev,
 				 ad->orig_dma_ops->sync_sg_for_device : NULL);
 }
 
-static const struct dma_map_ops apple_dma_ops = {
-	.alloc			= apple_dma_alloc,
-	.free			= apple_dma_free,
-	.APPLE_DMA_ALLOC_PAGES_FIELD = apple_dma_alloc_pages,
-	.free_pages		= apple_dma_free_pages,
+/*
+ * SRCU-guarded entry points.  The hook may be reached by a caller that loaded
+ * dev->dma_ops just before teardown restored it; the read section keeps the
+ * instance alive until that callback returns.
+ */
+#define APPLE_DMA_GUARD(ret, name, proto, args)			\
+static ret apple_dma_g_##name proto					\
+{									\
+	ret r;								\
+	int idx = srcu_read_lock(&apple_dma_srcu);			\
+	r = apple_dma_##name args;					\
+	srcu_read_unlock(&apple_dma_srcu, idx);			\
+	return r;							\
+}
+
+#define APPLE_DMA_GUARD_VOID(name, proto, args)			\
+static void apple_dma_g_##name proto					\
+{									\
+	int idx = srcu_read_lock(&apple_dma_srcu);			\
+	apple_dma_##name args;						\
+	srcu_read_unlock(&apple_dma_srcu, idx);			\
+}
+
+APPLE_DMA_GUARD(void *, alloc,
+		(struct device *dev, size_t size, dma_addr_t *dma_handle,
+		 gfp_t gfp, unsigned long attrs),
+		(dev, size, dma_handle, gfp, attrs))
+APPLE_DMA_GUARD_VOID(free,
+		(struct device *dev, size_t size, void *cpu_addr,
+		 dma_addr_t dma_addr, unsigned long attrs),
+		(dev, size, cpu_addr, dma_addr, attrs))
+APPLE_DMA_GUARD(struct page *, alloc_pages,
+		(struct device *dev, size_t size, dma_addr_t *dma_handle,
+		 enum dma_data_direction dir, gfp_t gfp),
+		(dev, size, dma_handle, dir, gfp))
+APPLE_DMA_GUARD_VOID(free_pages,
+		(struct device *dev, size_t size, struct page *page,
+		 dma_addr_t dma_addr, enum dma_data_direction dir),
+		(dev, size, page, dma_addr, dir))
 #ifdef APPLE_DMA_HAS_MAP_PHYS
-	.map_phys		= apple_dma_map_phys,
-	.unmap_phys		= apple_dma_unmap_phys,
+APPLE_DMA_GUARD(dma_addr_t, map_phys,
+		(struct device *dev, phys_addr_t phys, size_t size,
+		 enum dma_data_direction dir, unsigned long attrs),
+		(dev, phys, size, dir, attrs))
+APPLE_DMA_GUARD_VOID(unmap_phys,
+		(struct device *dev, dma_addr_t addr, size_t size,
+		 enum dma_data_direction dir, unsigned long attrs),
+		(dev, addr, size, dir, attrs))
 #else
-	.map_page		= apple_dma_map_page,
-	.unmap_page		= apple_dma_unmap_page,
+APPLE_DMA_GUARD(dma_addr_t, map_page,
+		(struct device *dev, struct page *page, unsigned long offset,
+		 size_t size, enum dma_data_direction dir,
+		 unsigned long attrs),
+		(dev, page, offset, size, dir, attrs))
+APPLE_DMA_GUARD_VOID(unmap_page,
+		(struct device *dev, dma_addr_t addr, size_t size,
+		 enum dma_data_direction dir, unsigned long attrs),
+		(dev, addr, size, dir, attrs))
 #endif
-	.map_sg			= apple_dma_map_sg,
-	.unmap_sg		= apple_dma_unmap_sg,
-	.sync_single_for_cpu	= apple_dma_sync_single_for_cpu,
-	.sync_single_for_device	= apple_dma_sync_single_for_device,
-	.sync_sg_for_cpu	= apple_dma_sync_sg_for_cpu,
-	.sync_sg_for_device	= apple_dma_sync_sg_for_device,
+APPLE_DMA_GUARD(int, map_sg,
+		(struct device *dev, struct scatterlist *sg, int nents,
+		 enum dma_data_direction dir, unsigned long attrs),
+		(dev, sg, nents, dir, attrs))
+APPLE_DMA_GUARD_VOID(unmap_sg,
+		(struct device *dev, struct scatterlist *sg, int nents,
+		 enum dma_data_direction dir, unsigned long attrs),
+		(dev, sg, nents, dir, attrs))
+APPLE_DMA_GUARD_VOID(sync_single_for_cpu,
+		(struct device *dev, dma_addr_t dma_handle, size_t size,
+		 enum dma_data_direction dir),
+		(dev, dma_handle, size, dir))
+APPLE_DMA_GUARD_VOID(sync_single_for_device,
+		(struct device *dev, dma_addr_t dma_handle, size_t size,
+		 enum dma_data_direction dir),
+		(dev, dma_handle, size, dir))
+APPLE_DMA_GUARD_VOID(sync_sg_for_cpu,
+		(struct device *dev, struct scatterlist *sg, int nents,
+		 enum dma_data_direction dir),
+		(dev, sg, nents, dir))
+APPLE_DMA_GUARD_VOID(sync_sg_for_device,
+		(struct device *dev, struct scatterlist *sg, int nents,
+		 enum dma_data_direction dir),
+		(dev, sg, nents, dir))
+
+static const struct dma_map_ops apple_dma_ops = {
+	.alloc			= apple_dma_g_alloc,
+	.free			= apple_dma_g_free,
+	.APPLE_DMA_ALLOC_PAGES_FIELD = apple_dma_g_alloc_pages,
+	.free_pages		= apple_dma_g_free_pages,
+#ifdef APPLE_DMA_HAS_MAP_PHYS
+	.map_phys		= apple_dma_g_map_phys,
+	.unmap_phys		= apple_dma_g_unmap_phys,
+#else
+	.map_page		= apple_dma_g_map_page,
+	.unmap_page		= apple_dma_g_unmap_page,
+#endif
+	.map_sg			= apple_dma_g_map_sg,
+	.unmap_sg		= apple_dma_g_unmap_sg,
+	.sync_single_for_cpu	= apple_dma_g_sync_single_for_cpu,
+	.sync_single_for_device	= apple_dma_g_sync_single_for_device,
+	.sync_sg_for_cpu	= apple_dma_g_sync_sg_for_cpu,
+	.sync_sg_for_device	= apple_dma_g_sync_sg_for_device,
 };
 
 /* ------------------------------------------------------------------ */
@@ -1790,27 +1893,52 @@ static int apple_dma_bind_managed_pci(struct apple_dma_dev *ad)
 
 	ad->managed_pdev = mpdev;
 	ad->orig_dma_ops = get_dma_ops(&mpdev->dev);
-	set_dma_ops(&mpdev->dev, &apple_dma_ops);
 
 	dev_info(&ad->pdev->dev, "bound to managed endpoint %s\n",
 		 pci_name(mpdev));
 	return 0;
 }
 
+/* Installed last, once the instance is published and ready. */
+static void apple_dma_install_hook(struct apple_dma_dev *ad)
+{
+	set_dma_ops(&ad->managed_pdev->dev, &apple_dma_ops);
+	ad->hooked = true;
+}
+
+static void apple_dma_restore_hook(struct apple_dma_dev *ad)
+{
+	if (!ad->hooked)
+		return;
+	set_dma_ops(&ad->managed_pdev->dev, ad->orig_dma_ops);
+	ad->hooked = false;
+}
+
 static void apple_dma_unbind_managed_pci(struct apple_dma_dev *ad)
 {
 	if (!ad->managed_pdev)
 		return;
-	set_dma_ops(&ad->managed_pdev->dev, ad->orig_dma_ops);
+	apple_dma_restore_hook(ad);
 	pci_dev_put(ad->managed_pdev);
 	ad->managed_pdev = NULL;
 }
 
+/*
+ * Teardown order: stop new callers (restore ops), stop new lookups
+ * (unpublish), then wait for callers already inside a callback.  Nothing the
+ * callbacks touch is freed before the SRCU drain completes.
+ */
 static void apple_dma_remove_instance(struct apple_dma_dev *ad)
 {
+	apple_dma_restore_hook(ad);
+	synchronize_rcu();
+	ad->ready = false;
+
 	mutex_lock(&instances_lock);
-	list_del(&ad->instance_node);
+	list_del_rcu(&ad->instance_node);
 	mutex_unlock(&instances_lock);
+	synchronize_rcu();
+	synchronize_srcu(&apple_dma_srcu);
 	pci_set_drvdata(ad->pdev, NULL);
 }
 
@@ -1949,12 +2077,14 @@ static int apple_dma_probe(struct pci_dev *pdev,
 			 "ARM-specific quirks are unavailable on this architecture\n");
 #endif
 
-	/* Add to instance list and mark ready */
+	/* Publish and mark ready before any device can reach the hook. */
 	mutex_lock(&instances_lock);
-	list_add_tail(&ad->instance_node, &apple_dma_instances);
+	list_add_tail_rcu(&ad->instance_node, &apple_dma_instances);
 	mutex_unlock(&instances_lock);
 
 	ad->ready = true;
+	smp_wmb();
+	apple_dma_install_hook(ad);
 
 	dev_info(&pdev->dev,
 		 "ready: managed_bdf=%04x max_entries=%u\n",
@@ -1979,7 +2109,6 @@ static void apple_dma_remove(struct pci_dev *pdev)
 	if (!ad)
 		return;
 
-	ad->ready = false;
 	apple_dma_remove_instance(ad);
 	apple_dma_release_resources(pdev, ad);
 	kfree(ad);
