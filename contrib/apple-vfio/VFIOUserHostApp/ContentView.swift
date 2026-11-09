@@ -272,10 +272,13 @@ private struct ExtensionRow: View {
                 detail: activationManager.extensionIdentifier,
                 state: .ok
             ) {
-                Button("Uninstall Driver") { confirmAndDeactivate() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(activationManager.requestInFlight || claimInUse)
+                HStack {
+                    Button("Update Driver") { confirmAndUpdate() }
+                    Button("Uninstall Driver") { confirmAndDeactivate() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(activationManager.requestInFlight || claimInUse)
             }
         } else if activationManager.isExtensionWaitingForApproval {
             ChecklistRow(
@@ -320,6 +323,23 @@ private struct ExtensionRow: View {
                 }
             }
         }
+    }
+
+    private func confirmAndUpdate() {
+        let alert = NSAlert()
+        alert.messageText = "Update the VFIO driver?"
+        alert.informativeText = """
+            This requests activation of the driver bundled with this app and \
+            may replace the active driver or require a reboot. Shut down all \
+            VMs using the device and release all claims first. This app cannot \
+            detect every external claim. Updating does not establish that the \
+            device is quiescent or safe to reset.
+            """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Update")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        activationManager.activate()
     }
 
     private func confirmAndDeactivate() {

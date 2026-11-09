@@ -46,6 +46,13 @@ validated.
 
 ### macOS lifecycle diagnostics
 
+When an extension is already active, the host app's **Update Driver** button
+submits an activation request for its bundled extension without first
+uninstalling the active one. Shut down VMs using the device and release all
+claims before updating; the app cannot detect every external claim. The update
+may require approval or a reboot, and the active version must be checked
+separately. An update does not establish device quiescence or reset safety.
+
 The host app logs extension requests and observed state changes under unified
 logging subsystem `uk.co.hitwithwrench.vfio`, category `extension`. DriverKit
 service and user-client lifecycle messages use the `vfio-user-dext:` prefix.
