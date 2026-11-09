@@ -1025,6 +1025,23 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
     region->chunkCount = chunkCount;
     vfio_user_note_dma_region_added(client, size, chunkCount);
 
+    {
+        static uint64_t registerLogCount;
+        uint64_t n = ++registerLogCount;
+        if (n <= 128 || (n % 256) == 0) {
+            vfio_user_dma_log(
+                "DMA register #%llu iova=%#llx size=%llu chunks=%u "
+                "segments=%u first_dma=%#llx first_len=%llu "
+                "active_regions=%llu active_bytes=%.1f MB",
+                n, iova, size, (unsigned int)chunkCount,
+                (unsigned int)outResult->segment_count,
+                outResult->segments[0].address,
+                (uint64_t)outResult->segments[0].length,
+                client->ivars->activeDMARegionCount,
+                vfio_user_dma_bytes_to_mb(client->ivars->activeDMABytes));
+        }
+    }
+
     outResult->status = 0;
     return kIOReturnSuccess;
 
@@ -1071,6 +1088,20 @@ vfio_user_unregister_client_dma_region(VFIOUserPCIDriverUserClient *client,
 
         vfio_user_note_dma_region_removed(client, region->size,
                                           region->chunkCount);
+
+        {
+            static uint64_t unregisterLogCount;
+            uint64_t n = ++unregisterLogCount;
+            if (n <= 128 || (n % 256) == 0) {
+                vfio_user_dma_log(
+                    "DMA unregister #%llu iova=%#llx size=%llu chunks=%u "
+                    "CompleteDMA ok active_regions=%llu active_bytes=%.1f MB",
+                    n, region->iova, region->size,
+                    (unsigned int)region->chunkCount,
+                    client->ivars->activeDMARegionCount,
+                    vfio_user_dma_bytes_to_mb(client->ivars->activeDMABytes));
+            }
+        }
 
         memset(region, 0, sizeof(*region));
         return kIOReturnSuccess;
