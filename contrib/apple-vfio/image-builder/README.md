@@ -148,6 +148,13 @@ DriverKit Open can map device memory, and Close can clear bus-master and memory
 enable bits. The probe does not set those bits, but they might already be set.
 It does not prove that the device is quiescent or that DMA is safe.
 
+`scripts/probe-bar.c` is a host-only BAR check (no guest, no DMA). It claims the
+device, reads BAR0/2/5 info, maps and unmaps the BAR2 and BAR5 descriptors
+without touching their contents, then releases the claim. Compile it the same
+way as the config probe and run `/tmp/vfio-probe-bar 44:00.0 1002:731f`. It
+stops at the first failure, and claiming can change PCI state. It is unverified
+on hardware.
+
 For an explicitly selected PCI registry entry, `scripts/rescan-pci.c` offers
 an opt-in PCI rescan request. It requires the exact BDF and vendor/device IDs,
 rejects ambiguous BDFs, and may rescan even when other services are attached,
