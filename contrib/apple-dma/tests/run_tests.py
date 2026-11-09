@@ -14,6 +14,7 @@ TESTS = (
     "test_hook_lifecycle.py",
     "test_client_stop.py",
     "test_driver_stop.py",
+    "test_reset_diagnostics.py",
     "test_interrupt_stop.py",
     "test_dma_buffer.py",
     "test_bounce_client.py",

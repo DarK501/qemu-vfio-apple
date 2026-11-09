@@ -420,13 +420,26 @@ static int apple_vfio_device_feature(VFIODevice *vdev,
 static int apple_vfio_device_reset(VFIODevice *vbasedev)
 {
     io_connect_t conn = apple_vfio_connection(vbasedev);
+    kern_return_t kr;
 
     if (conn == IO_OBJECT_NULL) {
+        warn_report("vfio-apple: reset requested for %s without a connection",
+                    vbasedev->name);
         return -ENODEV;
     }
 
-    return apple_host_backend()->client->reset_device(conn) == KERN_SUCCESS ?
-        0 : -EIO;
+    info_report("vfio-apple: requesting DriverKit reset for %s",
+                vbasedev->name);
+    kr = apple_host_backend()->client->reset_device(conn);
+    if (kr != KERN_SUCCESS) {
+        warn_report("vfio-apple: DriverKit reset for %s failed: 0x%x",
+                    vbasedev->name, (unsigned int)kr);
+        return -EIO;
+    }
+
+    info_report("vfio-apple: DriverKit reset returned success for %s",
+                vbasedev->name);
+    return 0;
 }
 
 static int apple_vfio_get_region_info(VFIODevice *vbasedev,

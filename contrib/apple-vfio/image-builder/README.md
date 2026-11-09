@@ -210,6 +210,11 @@ Interrupt-source cancellation is asynchronous. The client stop retains its
 state and returns `kIOReturnStillOpen` until cancellation completes. A later
 Stop invocation is required to finish cleanup; automatic retry behavior is not
 verified, and DriverKit may still force teardown.
+QEMU reports each backend reset request and result. The dext logs the
+function reset attempt and, if that fails, the hot-reset fallback and their
+DriverKit return codes as `vfio-user-dext: reset:`. A successful return does
+not prove the GPU is ready for another guest driver initialization; a hot
+reset can also affect devices on the same downstream bus.
 The connection, claim, BAR isolation, guest protocol, mapping, response and teardown mock
 checks run from the repository root with
 `python3 contrib/apple-dma/tests/run_tests.py`. They require C and C++

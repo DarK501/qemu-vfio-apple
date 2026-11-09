@@ -1794,14 +1794,19 @@ vfio_user_reset_device(VFIOUserPCIDriverUserClient *client)
      * upstream-port hot reset (secondary bus reset) if the function
      * doesn't advertise FLR.
      */
+    IOLog("vfio-user-dext: reset: requesting function reset\n");
     kern_return_t ret = pciDevice->Reset(kIOPCIDeviceResetTypeFunctionReset,
                                          kIOPCIDeviceResetOptionNone);
+    IOLog("vfio-user-dext: reset: function reset returned %#x\n", ret);
     if (ret == kIOReturnSuccess) {
         return ret;
     }
 
-    return pciDevice->Reset(kIOPCIDeviceResetTypeHotReset,
-                            kIOPCIDeviceResetOptionNone);
+    IOLog("vfio-user-dext: reset: requesting hot reset\n");
+    ret = pciDevice->Reset(kIOPCIDeviceResetTypeHotReset,
+                           kIOPCIDeviceResetOptionNone);
+    IOLog("vfio-user-dext: reset: hot reset returned %#x\n", ret);
+    return ret;
 }
 
 static kern_return_t
