@@ -97,7 +97,7 @@ def main():
     source = SOURCE.read_text()
     start = source.index(
         "static kern_return_t\nvfio_user_release_all_interrupts("
-        "VFIOUserPCIDriverUserClient *client)")
+        "VFIOUserPCIDriverUserClient *client)\n{")
     end = source.index(
         "\nstatic uint32_t\nvfio_user_get_requested_interrupt_vectors", start)
     body = source[start:end].replace(

@@ -394,6 +394,9 @@ vfio_user_service_claimed(VFIOUserPCIDriverUserClient *client)
 }
 
 static kern_return_t
+vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *client);
+
+static kern_return_t
 vfio_user_claim_device(VFIOUserPCIDriverUserClient *client,
                        IOService *driverService,
                        const VFIOUserPCIDeviceIdentity *identity)
@@ -542,6 +545,14 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
             client->ivars->activeDMABytes,
             client->ivars->dmaBuffer != nullptr,
             client->ivars->dmaCommand != nullptr);
+        return kIOReturnStillOpen;
+    }
+
+    kern_return_t irqRet = vfio_user_release_all_interrupts(client);
+    if (irqRet != kIOReturnSuccess) {
+        vfio_user_dma_log(
+            "claim release deferred while interrupt cancellation is pending "
+            "(kr=%#x)", irqRet);
         return kIOReturnStillOpen;
     }
 
@@ -1545,9 +1556,6 @@ IMPL(VFIOUserPCIDriverUserClient, Start)
     return kIOReturnSuccess;
 }
 
-static kern_return_t
-vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *);
-
 kern_return_t
 IMPL(VFIOUserPCIDriverUserClient, Stop)
 {
@@ -2022,15 +2030,6 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     }
 
     case kVFIOUserPCIDriverUserClientMethodReleaseClaim:
-        if (ivars != nullptr && ivars->claimed) {
-            ret = vfio_user_release_all_interrupts(this);
-            if (ret != kIOReturnSuccess) {
-                os_log(OS_LOG_DEFAULT,
-                       "vfio-user-dext: claim release waiting for interrupt cleanup: %#x",
-                       ret);
-                return ret;
-            }
-        }
         return vfio_user_release_claim(this);
 
     case kVFIOUserPCIDriverUserClientMethodTerminate:

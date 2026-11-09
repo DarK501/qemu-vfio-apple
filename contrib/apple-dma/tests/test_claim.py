@@ -86,6 +86,13 @@ static IOPCIDevice *vfio_user_get_pci_device(IOService *service)
     return static_cast<VFIOUserPCIDriver *>(service)->device;
 }
 static void vfio_user_dma_log(const char *, ...) {}
+static int interrupt_cleanup_result, interrupt_cleanup_calls;
+static kern_return_t vfio_user_release_all_interrupts(
+    VFIOUserPCIDriverUserClient *)
+{
+    interrupt_cleanup_calls++;
+    return interrupt_cleanup_result;
+}
 """
 
 SUFFIX = r"""
@@ -216,6 +223,12 @@ int main()
     assert(vars1.claimed && driver_vars.openerClient == &c1 &&
            (pci.command & 0x04) != 0);
     vars1.activeDMARegionCount = 0;
+    interrupt_cleanup_result = kIOReturnStillOpen;
+    int writes_before_irq_wait = pci.writes;
+    assert(vfio_user_release_claim(&c1) == kIOReturnStillOpen);
+    assert(vars1.claimed && driver_vars.openerClient == &c1 &&
+           (pci.command & 0x04) != 0 && pci.writes == writes_before_irq_wait);
+    interrupt_cleanup_result = kIOReturnSuccess;
     pci.ignore_writes = true;
     assert(vfio_user_release_claim(&c1) == kIOReturnNotReady);
     assert(vars1.claimed && driver_vars.openerClient == &c1 &&
@@ -224,6 +237,7 @@ int main()
     assert(vfio_user_release_claim(&c1) == kIOReturnSuccess);
     assert(!vars1.claimed && !driver_vars.openerClient);
     assert(pci.opens == 7 && pci.closes == 7 && (pci.command & 0x04) == 0);
+    assert(interrupt_cleanup_calls == 5);
 }
 """
 

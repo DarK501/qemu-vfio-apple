@@ -25,17 +25,24 @@ non-identity original scatter-gather mappings, a direct SG backend without
 DMA operations, and host mappings whose segments are not contiguous for a
 single guest range. It also requires a kernel with per-device DMA operations.
 These limitations can prevent passthrough workloads from working.
-The guest module compiles against Ubuntu x86_64 6.8, 6.17, and
-7.0.0-43-generic (26.04) kernel headers; that does not validate loading or
-DMA. Older kernels expose per-device DMA operations under `CONFIG_DMA_OPS`,
-while newer kernels use `CONFIG_ARCH_HAS_DMA_OPS`.
+The x86 guest module now requires the explicit-ops DMA API extension in
+`contrib/apple-dma/linux/apple-dma-explicit-ops-v7.0.patch`. It targets upstream
+Linux v7.0 and applies against the Ubuntu 7.0.0-43.43 downstream DMA mapping
+delta. The patched DMA-core object and DKMS module objects compile against that
+source/config in a disposable guest. A full kernel build, patched
+`Module.symvers` generation, and final DKMS `.ko` link have not been run.
+The module deliberately fails to compile against x86 headers without this
+extension. The extension lets x86 wrappers call the captured original DMA ops
+without changing the device's shared `dma_ops` pointer. A mock checks that
+delegation keeps the wrapper installed while calls use the original ops table.
 
-The guest wrapper temporarily replaces a managed device's DMA operations while
-calling the original DMA API. Concurrent DMA calls may observe those original
-operations and bypass the companion, potentially using guest addresses rather
-than host device addresses. This is an unresolved correctness and safety
-blocker: do not use this path for physical device DMA until the wrapper is
-redesigned and validated for concurrent calls.
+The existing ARM64 path and behavior are preserved and still temporarily
+replace a managed device's DMA operations while delegating. The interception
+fix does not validate hook installation/removal synchronization, active
+callback lifetime during teardown, guest mapping coverage, outstanding DMA
+drain, or hardware behavior. Do not use physical guest DMA on either
+architecture until those remaining lifecycle issues are resolved and
+validated.
 
 ### macOS lifecycle diagnostics
 
@@ -82,6 +89,12 @@ its state and do not establish device quiescence. The existing claim
 operation enables bus mastering, which can allow device-initiated DMA even
 without a guest. Do not run a guest using the physical device or attempt DMA
 while the safety blocker remains.
+The BAR descriptor request is made using the DriverKit PCI service that owns
+the open session, and the user client retains a cached descriptor until Stop.
+Mocks check descriptor reference accounting only. BAR0, BAR2 and BAR5 mapping
+on the tested RX 5700 XT previously failed with `kIOReturnNotOpen`; this owner
+correction has not been validated on hardware, and no MMIO fallback is proven
+to work.
 
 The host app also offers an explicit **Claim GPU** button. It selects a display
 device by registry identity and, if no VFIO service is present, requests a PCI
@@ -96,7 +109,8 @@ disrupt macOS and other devices. The app retains the user-client connection
 until **Release GPU**, window teardown, or process exit; it cannot hand that
 claim to QEMU directly. Release GPU synchronously asks the dext to reject
 release while DMA resources remain, clear and verify the PCI Bus Master Enable
-bit, and release the app's claim. If any step fails, the app retains its
+bit, and release the app's claim. A cleared bus-master bit does not prove that
+already-issued DMA has drained. If any step fails, the app retains its
 connection and reports the failure. The dext retains its Start-time PCI Open
 after a successful app release so it continues to own the nub; a subsequent
 VFIO user client can acquire the released claim. A successful claim does not

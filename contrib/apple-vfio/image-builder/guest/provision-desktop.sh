@@ -7,6 +7,7 @@ INSTALL_FEX="${INSTALL_FEX:-1}"
 INSTALL_STEAM="${INSTALL_STEAM:-1}"
 INSTALL_NVIDIA="${INSTALL_NVIDIA:-1}"
 INSTALL_APPLE_DMA="${INSTALL_APPLE_DMA:-1}"
+APPLE_DMA_READY=0
 
 # Debug kernel cmdline params.  Default on because this image is used for
 # eGPU-passthrough development and we want any guest-side memory
@@ -717,6 +718,18 @@ if [ "$INSTALL_NVIDIA" = "1" ]; then
     fi
 fi
 
+apple_dma_target_kernel() {
+    local image_path="${1:-/boot/vmlinuz}"
+    local image_target
+
+    image_target=$(readlink "$image_path") || return 1
+    image_target="${image_target##*/}"
+    case "$image_target" in
+        vmlinuz-*) printf '%s\n' "${image_target#vmlinuz-}" ;;
+        *) return 1 ;;
+    esac
+}
+
 install_apple_dma_dkms() {
     if [ ! -f "$APPLE_DMA_SRC_TGZ" ]; then
         warn "apple-dma source tarball not found at $APPLE_DMA_SRC_TGZ"
@@ -751,18 +764,20 @@ install_apple_dma_dkms() {
         return 1
     fi
 
-    local kver any_built=0
-    for kver in $(ls /lib/modules); do
-        [ -d "/lib/modules/$kver/build" ] || continue
-        log "building apple-dma for kernel $kver"
-        if dkms install --force "apple-dma/${APPLE_DMA_VERSION}" -k "$kver"; then
-            any_built=1
-        else
-            warn "dkms install failed for kernel $kver"
-        fi
-    done
-    if [ "$any_built" = "0" ]; then
-        warn "apple-dma was not built for any installed kernel"
+    local target_kver
+    target_kver=$(apple_dma_target_kernel /boot/vmlinuz) || {
+        warn "cannot determine the kernel selected by /boot/vmlinuz"
+        return 1
+    }
+    if [ ! -d "/lib/modules/$target_kver/build" ]; then
+        warn "headers are unavailable for selected kernel $target_kver"
+        return 1
+    fi
+
+    log "building apple-dma for selected kernel $target_kver"
+    if ! dkms install --force "apple-dma/${APPLE_DMA_VERSION}" \
+            -k "$target_kver"; then
+        warn "dkms install failed for selected kernel $target_kver"
         return 1
     fi
 
@@ -780,10 +795,13 @@ install_apple_dma_dkms() {
 
 if [ "$INSTALL_APPLE_DMA" = "1" ]; then
     log "installing apple-dma kernel module via dkms"
-    if ! install_apple_dma_dkms; then
+    if install_apple_dma_dkms; then
+        APPLE_DMA_READY=1
+    else
         warn "apple-dma install incomplete"
     fi
 fi
+log "apple_dma_ready=$([ "$APPLE_DMA_READY" = "1" ] && printf true || printf false)"
 
 install_first_boot_finalizer
 
@@ -906,7 +924,7 @@ cat > /var/lib/qemu-vfio/image-ready.json <<EOF
   "fex": $([ "$INSTALL_FEX" = "1" ] && printf true || printf false),
   "steam": $([ "$INSTALL_STEAM" = "1" ] && printf true || printf false),
   "nvidia": $([ "$INSTALL_NVIDIA" = "1" ] && printf true || printf false),
-  "apple_dma": $([ "$INSTALL_APPLE_DMA" = "1" ] && printf true || printf false)
+    "apple_dma": $([ "$APPLE_DMA_READY" = "1" ] && printf true || printf false)
 }
 EOF
 

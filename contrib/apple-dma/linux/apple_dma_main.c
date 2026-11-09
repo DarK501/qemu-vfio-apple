@@ -49,6 +49,10 @@
 #error "apple_dma requires per-device DMA operations in struct device"
 #endif
 
+#if defined(CONFIG_X86) && !defined(DMA_MAP_OPS_EXPLICIT_DISPATCH)
+#error "apple_dma on x86 requires the explicit DMA ops dispatch kernel patch"
+#endif
+
 /*
  * Linux 6.10 renamed .alloc_pages to .alloc_pages_op in struct dma_map_ops
  * to avoid a conflict with the alloc_pages() macro added for memory-allocation
@@ -364,6 +368,7 @@ static __noreturn void apple_dma_panic_state(struct device *dev,
 	panic("apple_dma: fatal: %s on %s\n", reason, dev_name(dev));
 }
 
+#ifndef CONFIG_X86
 #define APPLE_DMA_CALL_ORIG_RET(ad, dev, expr)				\
 ({									\
 	struct device *__dev = (dev);					\
@@ -385,6 +390,145 @@ do {									\
 	expr;								\
 	set_dma_ops(__dev, saved__);					\
 } while (0)
+#endif
+
+#ifdef APPLE_DMA_HAS_MAP_PHYS
+static dma_addr_t apple_dma_orig_map_phys(struct apple_dma_dev *ad,
+					  struct device *dev, phys_addr_t phys,
+					  size_t size,
+					  enum dma_data_direction dir,
+					  unsigned long attrs)
+{
+#ifdef CONFIG_X86
+	return dma_map_phys_with_ops(dev, ad ? ad->orig_dma_ops : NULL,
+				     phys, size, dir, attrs);
+#else
+	return APPLE_DMA_CALL_ORIG_RET(ad, dev,
+				       dma_map_phys(dev, phys, size, dir, attrs));
+#endif
+}
+
+static void apple_dma_orig_unmap_phys(struct apple_dma_dev *ad,
+				      struct device *dev, dma_addr_t addr,
+				      size_t size,
+				      enum dma_data_direction dir,
+				      unsigned long attrs)
+{
+#ifdef CONFIG_X86
+	dma_unmap_phys_with_ops(dev, ad ? ad->orig_dma_ops : NULL, addr, size,
+				dir, attrs);
+#else
+	APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+				 dma_unmap_phys(dev, addr, size, dir, attrs));
+#endif
+}
+#else
+static dma_addr_t apple_dma_orig_map_page(struct apple_dma_dev *ad,
+					  struct device *dev, struct page *page,
+					  unsigned long offset, size_t size,
+					  enum dma_data_direction dir,
+					  unsigned long attrs)
+{
+#ifdef CONFIG_X86
+	return dma_map_page_attrs_with_ops(dev, ad ? ad->orig_dma_ops : NULL,
+					   page, offset, size, dir, attrs);
+#else
+	return APPLE_DMA_CALL_ORIG_RET(ad, dev,
+				       dma_map_page_attrs(dev, page, offset, size,
+							  dir, attrs));
+#endif
+}
+
+static void apple_dma_orig_unmap_page(struct apple_dma_dev *ad,
+				      struct device *dev, dma_addr_t addr,
+				      size_t size,
+				      enum dma_data_direction dir,
+				      unsigned long attrs)
+{
+#ifdef CONFIG_X86
+	dma_unmap_page_attrs_with_ops(dev, ad ? ad->orig_dma_ops : NULL, addr,
+				      size, dir, attrs);
+#else
+	APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+				 dma_unmap_page_attrs(dev, addr, size, dir, attrs));
+#endif
+}
+#endif
+
+static void apple_dma_orig_unmap_sg(struct apple_dma_dev *ad,
+				    struct device *dev, struct scatterlist *sg,
+				    int nents, enum dma_data_direction dir,
+				    unsigned long attrs)
+{
+#ifdef CONFIG_X86
+	dma_unmap_sg_attrs_with_ops(dev, ad ? ad->orig_dma_ops : NULL, sg,
+				    nents, dir, attrs);
+#else
+	APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+				 dma_unmap_sg_attrs(dev, sg, nents, dir, attrs));
+#endif
+}
+
+static void *apple_dma_orig_alloc_attrs(struct apple_dma_dev *ad,
+					struct device *dev, size_t size,
+					dma_addr_t *dma_handle, gfp_t gfp,
+					unsigned long attrs)
+{
+#ifdef CONFIG_X86
+	return dma_alloc_attrs_with_ops(dev, ad ? ad->orig_dma_ops : NULL,
+					size, dma_handle, gfp, attrs);
+#else
+	return APPLE_DMA_CALL_ORIG_RET(ad, dev,
+				       dma_alloc_attrs(dev, size, dma_handle,
+						       gfp, attrs));
+#endif
+}
+
+static void apple_dma_orig_free_attrs(struct apple_dma_dev *ad,
+				      struct device *dev, size_t size,
+				      void *cpu_addr, dma_addr_t dma_handle,
+				      unsigned long attrs)
+{
+#ifdef CONFIG_X86
+	dma_free_attrs_with_ops(dev, ad ? ad->orig_dma_ops : NULL, size,
+				cpu_addr, dma_handle, attrs);
+#else
+	APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+				 dma_free_attrs(dev, size, cpu_addr, dma_handle,
+						attrs));
+#endif
+}
+
+static struct page *apple_dma_orig_alloc_pages(struct apple_dma_dev *ad,
+					       struct device *dev, size_t size,
+					       dma_addr_t *dma_handle,
+					       enum dma_data_direction dir,
+					       gfp_t gfp)
+{
+#ifdef CONFIG_X86
+	return dma_alloc_pages_with_ops(dev, ad ? ad->orig_dma_ops : NULL,
+					 size, dma_handle, dir, gfp);
+#else
+	return APPLE_DMA_CALL_ORIG_RET(ad, dev,
+				       dma_alloc_pages(dev, size, dma_handle,
+						       dir, gfp));
+#endif
+}
+
+static void apple_dma_orig_free_pages(struct apple_dma_dev *ad,
+				      struct device *dev, size_t size,
+				      struct page *page,
+				      dma_addr_t dma_handle,
+				      enum dma_data_direction dir)
+{
+#ifdef CONFIG_X86
+	dma_free_pages_with_ops(dev, ad ? ad->orig_dma_ops : NULL, size, page,
+				dma_handle, dir);
+#else
+	APPLE_DMA_CALL_ORIG_VOID(ad, dev,
+				 dma_free_pages(dev, size, page, dma_handle, dir));
+#endif
+}
 
 /* ------------------------------------------------------------------ */
 /* Batch submission via shared command page + doorbell                  */
@@ -984,9 +1128,7 @@ static dma_addr_t apple_dma_map_phys(struct device *dev, phys_addr_t phys,
 			 count, &phys, size);
 
 	if (!ad || !ad->orig_dma_ops)
-		orig = APPLE_DMA_CALL_ORIG_RET(ad, dev,
-					       dma_map_phys(dev, phys, size,
-							    dir, attrs));
+		orig = apple_dma_orig_map_phys(ad, dev, phys, size, dir, attrs);
 	else if (ad->orig_dma_ops->map_phys)
 		orig = ad->orig_dma_ops->map_phys(dev, phys, size, dir, attrs);
 	else
@@ -998,10 +1140,7 @@ static dma_addr_t apple_dma_map_phys(struct device *dev, phys_addr_t phys,
 	ret = apple_dma_map_one(ad, dev, phys, size, orig, &mapped);
 	if (ret) {
 		if (!ad || !ad->orig_dma_ops)
-			APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-						 dma_unmap_phys(dev, orig,
-								size, dir,
-								attrs));
+			apple_dma_orig_unmap_phys(ad, dev, orig, size, dir, attrs);
 		else if (ad->orig_dma_ops->unmap_phys)
 			ad->orig_dma_ops->unmap_phys(dev, orig, size, dir,
 						     attrs);
@@ -1023,9 +1162,7 @@ static void apple_dma_unmap_phys(struct device *dev, dma_addr_t addr,
 				   APPLE_DMA_TRACE_OP_UNMAP);
 
 	if (!ad || !ad->orig_dma_ops)
-		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-					 dma_unmap_phys(dev, orig, size, dir,
-							attrs));
+		apple_dma_orig_unmap_phys(ad, dev, orig, size, dir, attrs);
 	else if (ad->orig_dma_ops->unmap_phys)
 		ad->orig_dma_ops->unmap_phys(dev, orig, size, dir, attrs);
 }
@@ -1047,10 +1184,8 @@ static dma_addr_t apple_dma_map_page(struct device *dev, struct page *page,
 			 count, &phys, size);
 
 	if (!ad || !ad->orig_dma_ops)
-		orig = APPLE_DMA_CALL_ORIG_RET(ad, dev,
-					       dma_map_page_attrs(dev, page,
-								 offset, size,
-								 dir, attrs));
+		orig = apple_dma_orig_map_page(ad, dev, page, offset, size, dir,
+					       attrs);
 	else if (ad->orig_dma_ops->map_page)
 		orig = ad->orig_dma_ops->map_page(dev, page, offset, size,
 						   dir, attrs);
@@ -1063,12 +1198,7 @@ static dma_addr_t apple_dma_map_page(struct device *dev, struct page *page,
 	ret = apple_dma_map_one(ad, dev, phys, size, orig, &mapped);
 	if (ret) {
 		if (!ad || !ad->orig_dma_ops)
-			APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-						 dma_unmap_page_attrs(dev,
-								      orig,
-								      size,
-								      dir,
-								      attrs));
+			apple_dma_orig_unmap_page(ad, dev, orig, size, dir, attrs);
 		else if (ad->orig_dma_ops->unmap_page)
 			ad->orig_dma_ops->unmap_page(dev, orig, size, dir,
 						     attrs);
@@ -1090,9 +1220,7 @@ static void apple_dma_unmap_page(struct device *dev, dma_addr_t addr,
 				   APPLE_DMA_TRACE_OP_UNMAP);
 
 	if (!ad || !ad->orig_dma_ops)
-		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-					 dma_unmap_page_attrs(dev, orig, size,
-							      dir, attrs));
+		apple_dma_orig_unmap_page(ad, dev, orig, size, dir, attrs);
 	else if (ad->orig_dma_ops->unmap_page)
 		ad->orig_dma_ops->unmap_page(dev, orig, size, dir, attrs);
 }
@@ -1183,9 +1311,7 @@ static int apple_dma_map_sg(struct device *dev, struct scatterlist *sg,
 		if (ad->orig_dma_ops->unmap_sg)
 			ad->orig_dma_ops->unmap_sg(dev, sg, nents, dir, attrs);
 		else
-			APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-						 dma_unmap_sg_attrs(dev, sg, nents,
-								    dir, attrs));
+			apple_dma_orig_unmap_sg(ad, dev, sg, nents, dir, attrs);
 		goto err_remove_sg_map;
 	}
 	sg_map->orig_mapped = mapped;
@@ -1286,9 +1412,7 @@ err_unmap_orig:
 	if (ad->orig_dma_ops->unmap_sg)
 		ad->orig_dma_ops->unmap_sg(dev, sg, nents, dir, attrs);
 	else
-		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-					 dma_unmap_sg_attrs(dev, sg, nents,
-							    dir, attrs));
+		apple_dma_orig_unmap_sg(ad, dev, sg, nents, dir, attrs);
 err_remove_sg_map:
 	spin_lock_irqsave(&ad->maps_lock, flags);
 	list_del(&sg_map->node);
@@ -1362,9 +1486,7 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 	}
 
 	if (!ad || !ad->orig_dma_ops)
-		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-					 dma_unmap_sg_attrs(dev, sg, nents,
-							    dir, attrs));
+		apple_dma_orig_unmap_sg(ad, dev, sg, nents, dir, attrs);
 	else if (ad->orig_dma_ops->unmap_sg)
 		ad->orig_dma_ops->unmap_sg(dev, sg, nents, dir, attrs);
 
@@ -1412,25 +1534,20 @@ static void *apple_dma_alloc(struct device *dev, size_t size,
 		dev_info(dev, "apple_dma: alloc #%u size=%zu\n",
 			 count, size);
 
-	cpu_addr = APPLE_DMA_CALL_ORIG_RET(ad, dev,
-					   dma_alloc_attrs(dev, size, &orig_dma,
-							   gfp, attrs));
+	cpu_addr = apple_dma_orig_alloc_attrs(ad, dev, size, &orig_dma,
+					      gfp, attrs);
 	if (!cpu_addr)
 		return NULL;
 
 	if (!virt_addr_valid(cpu_addr)) {
 		dev_warn(dev, "apple_dma: coherent allocation is not directly mapped\n");
-		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-					 dma_free_attrs(dev, size, cpu_addr,
-							orig_dma, attrs));
+		apple_dma_orig_free_attrs(ad, dev, size, cpu_addr, orig_dma, attrs);
 		return NULL;
 	}
 
 	phys = virt_to_phys(cpu_addr);
 	if (apple_dma_remap_alloc(ad, dev, phys, size, orig_dma, dma_handle)) {
-		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-					 dma_free_attrs(dev, size, cpu_addr,
-							orig_dma, attrs));
+		apple_dma_orig_free_attrs(ad, dev, size, cpu_addr, orig_dma, attrs);
 		return NULL;
 	}
 
@@ -1446,9 +1563,7 @@ static void apple_dma_free(struct device *dev, size_t size, void *cpu_addr,
 	apple_dma_trace_stat_inc(APPLE_DMA_STAT_FREE);
 	orig_dma = apple_dma_unmap_one(ad, dev, dma_addr, size,
 				       APPLE_DMA_TRACE_OP_FREE);
-	APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-				 dma_free_attrs(dev, size, cpu_addr, orig_dma,
-						attrs));
+	apple_dma_orig_free_attrs(ad, dev, size, cpu_addr, orig_dma, attrs);
 }
 
 static struct page *apple_dma_alloc_pages(struct device *dev, size_t size,
@@ -1467,17 +1582,13 @@ static struct page *apple_dma_alloc_pages(struct device *dev, size_t size,
 		dev_info(dev, "apple_dma: alloc_pages #%u size=%zu\n",
 			 count, size);
 
-	page = APPLE_DMA_CALL_ORIG_RET(ad, dev,
-				       dma_alloc_pages(dev, size, &orig_dma, dir,
-						       gfp));
+	page = apple_dma_orig_alloc_pages(ad, dev, size, &orig_dma, dir, gfp);
 	if (!page)
 		return NULL;
 
 	phys = page_to_phys(page);
 	if (apple_dma_remap_alloc(ad, dev, phys, size, orig_dma, dma_handle)) {
-		APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-					 dma_free_pages(dev, size, page,
-							orig_dma, dir));
+		apple_dma_orig_free_pages(ad, dev, size, page, orig_dma, dir);
 		return NULL;
 	}
 
@@ -1494,9 +1605,7 @@ static void apple_dma_free_pages(struct device *dev, size_t size,
 	apple_dma_trace_stat_inc(APPLE_DMA_STAT_FREE);
 	orig_dma = apple_dma_unmap_one(ad, dev, dma_addr, size,
 				       APPLE_DMA_TRACE_OP_FREE);
-	APPLE_DMA_CALL_ORIG_VOID(ad, dev,
-				 dma_free_pages(dev, size, page, orig_dma,
-						dir));
+	apple_dma_orig_free_pages(ad, dev, size, page, orig_dma, dir);
 }
 
 /* ------------------------------------------------------------------ */

@@ -392,7 +392,10 @@ manifest = {
         "fex": os.environ["INSTALL_FEX"] == "1",
         "steam": os.environ["INSTALL_STEAM"] == "1",
         "nvidia": os.environ["INSTALL_NVIDIA"] == "1",
-        "apple_dma": os.environ["INSTALL_APPLE_DMA"] == "1",
+        "apple_dma": any(
+            "apple_dma_ready=true" in line
+            for line in Path(os.environ["BUILD_LOG"]).read_text().splitlines()
+        ),
     },
     "sha256": os.environ["ARTIFACT_SHA256"],
     "size_bytes": int(os.environ["ARTIFACT_SIZE"]),
@@ -426,6 +429,7 @@ main() {
     export ARTIFACT_SHA256 ARTIFACT_SIZE
     export GUEST_ARCH IMAGE_NAME FINAL_IMAGE BASE_IMAGE BASE_IMAGE_URL DISK_SIZE CPUS MEMORY
     export BUILD_USER INSTALL_FEX INSTALL_STEAM INSTALL_NVIDIA INSTALL_APPLE_DMA
+    export BUILD_LOG
 
     write_manifest
 

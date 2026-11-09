@@ -33,6 +33,7 @@ struct IOPCIDevice {
     IOMemoryDescriptor *bar;
     int copies = 0;
     IOService *sessionOwner = nullptr;
+    IOService *lastOwner = nullptr;
     int GetBARInfo(uint8_t idx, uint8_t *memoryIndex, uint64_t *size,
                    uint8_t *barType) {
         *memoryIndex = idx;
@@ -41,11 +42,12 @@ struct IOPCIDevice {
         return kIOReturnSuccess;
     }
     int _CopyDeviceMemoryWithIndex(uint8_t, IOMemoryDescriptor **memory,
-                                   IOService *client) {
+                                   IOService *owner) {
         copies++;
-        if (client != sessionOwner) {
+        if (owner != sessionOwner) {
             return kIOReturnNotOpen;
         }
+        lastOwner = owner;
         bar->retain();
         *memory = bar;
         return kIOReturnSuccess;
@@ -109,10 +111,11 @@ int main()
     assert(primary_a_vars.barDescCache[0] == nullptr && pci_a.copies == 1);
     pci_a.sessionOwner = &driver_a;
     assert(primary_a.copy(10, &options, &result) == kIOReturnSuccess);
-    assert(result == &a && pci_a.copies == 2);
+    assert(result == &a && pci_a.copies == 2 &&
+           pci_a.lastOwner == &driver_a);
     result->release();
     assert(primary_b.copy(10, &options, &result) == kIOReturnSuccess);
-    assert(result == &b && pci_b.copies == 1);
+    assert(result == &b && pci_b.copies == 1 && pci_b.lastOwner == &driver_b);
     result->release();
     assert(secondary_a.copy(10, &options, &result) == kIOReturnNotOpen);
     assert(secondary_b.copy(10, &options, &result) == kIOReturnNotOpen);

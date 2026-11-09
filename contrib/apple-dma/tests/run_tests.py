@@ -10,6 +10,7 @@ TESTS = (
     "test_pci_identity.py",
     "test_claim.py",
     "test_claim_client.py",
+    "test_dma_ops_dispatch.py",
     "test_client_stop.py",
     "test_driver_stop.py",
     "test_interrupt_stop.py",
