@@ -12,6 +12,10 @@ SOURCE = ROOT / "contrib/apple-vfio/VFIOUserPCIDriver/VFIOUserPCIDriver.cpp"
 PREFIX = r"""
 #include <cassert>
 #include <cstdint>
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+#include <vector>
 using kern_return_t = int;
 enum { kIOReturnSuccess = 0, kIOReturnStillOpen = 1 };
 #define OS_LOG_DEFAULT 0
@@ -37,6 +41,9 @@ struct ClientIvars {
     uint64_t dmaCompleteFailureCount = 0;
     Object *barDescCache[6] = {};
     bool claimed = false;
+    Object *dmaBuffer = nullptr;
+    bool interruptsSetUp = false;
+    uint32_t pendingInterruptCancelCount = 0;
 };
 using VFIOUserPCIDriverUserClient_IVars = ClientIvars;
 struct VFIOUserPCIDriverUserClient : IOService {
@@ -50,7 +57,15 @@ static double vfio_user_dma_bytes_to_mb(uint64_t bytes)
 {
     return static_cast<double>(bytes);
 }
-static void vfio_user_dma_log(const char *, ...) {}
+static std::vector<std::string> logs;
+static void vfio_user_dma_log(const char *fmt, ...) {
+    char message[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(message, sizeof(message), fmt, ap);
+    va_end(ap);
+    logs.emplace_back(message);
+}
 static int vfio_user_release_all_interrupts(VFIOUserPCIDriverUserClient *)
 {
     cleanup_irqs++;
@@ -106,6 +121,7 @@ int main()
     assert(client.ivars == &client_vars && client_vars.claimed);
     assert(driver_vars.openerClient == &client && !deleted && !super_stops);
     assert(cleanup_regions == 0 && !releases);
+    assert(logs[0].find("claimed=1 active_regions=0 active_chunks=0 dma_buffer=0 interrupts=0 pending_cancels=0") != std::string::npos);
     irq_cleanup_result = kIOReturnSuccess;
 
     client_vars.activeDMARegionCount = 1;

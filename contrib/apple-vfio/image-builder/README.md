@@ -56,6 +56,14 @@ separately. An update does not establish device quiescence or reset safety.
 The host app logs extension requests and observed state changes under unified
 logging subsystem `uk.co.hitwithwrench.vfio`, category `extension`. DriverKit
 service and user-client lifecycle messages use the `vfio-user-dext:` prefix.
+The `vfio-user-dext: lifecycle:` messages record whether Start retained the
+PCI Open, the owner and blocked flags on service Stop, and whether the close
+and superclass Stop were reached. Client Stop logs its claim, DMA and
+interrupt cleanup state. These are point-in-time observations, not proof of
+DMA quiescence. If no Stop entry is visible, the call may not have reached the
+driver, but missing or filtered logs cannot prove that. The diagnostics are
+available only while the instrumented dext is actually running; an older
+service terminating during its upgrade cannot emit them.
 To additionally log the start, PID and exit of each two-second status poll,
 launch the signed app executable with `VFIO_TRACE_POLLING=1`:
 

@@ -593,6 +593,8 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: retained Start-time PCI Open; bus mastering is off");
     }
+    vfio_user_dma_log("lifecycle: claim release clearing owner start_open=%d",
+                      (int)driver->ivars->startOpen);
     client->ivars->claimed = false;
     __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
     __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
@@ -1501,6 +1503,8 @@ IMPL(VFIOUserPCIDriver, Start)
     ret = pciDevice->Open(this, 0);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start early PCI Open returned %#x", ret);
     ivars->startOpen = (ret == kIOReturnSuccess);
+    vfio_user_dma_log("lifecycle: service Start PCI Open result=%#x retained=%d",
+                      ret, (int)ivars->startOpen);
 
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start calling RegisterService");
     RegisterService();
@@ -1540,23 +1544,40 @@ kern_return_t
 IMPL(VFIOUserPCIDriver, Stop)
 {
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop entered");
+    if (ivars != nullptr) {
+        vfio_user_dma_log(
+            "lifecycle: service Stop entered start_open=%d owner_present=%d "
+            "claim_blocked=%d",
+            (int)ivars->startOpen,
+            (int)(__atomic_load_n(&ivars->openerClient, __ATOMIC_ACQUIRE) != nullptr),
+            (int)__atomic_load_n(&ivars->claimBlocked, __ATOMIC_ACQUIRE));
+    } else {
+        vfio_user_dma_log("lifecycle: service Stop entered without state");
+    }
     if (ivars != nullptr &&
         __atomic_load_n(&ivars->openerClient, __ATOMIC_ACQUIRE) != nullptr) {
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: provider stop request rejected while PCI "
                "device remains claimed; DriverKit may still force teardown");
+        vfio_user_dma_log("lifecycle: service Stop refused: owner present");
         return kIOReturnStillOpen;
     }
     if (ivars != nullptr && ivars->startOpen) {
         IOPCIDevice *stopDevice = vfio_user_get_pci_device(this);
         if (stopDevice != nullptr) {
+            vfio_user_dma_log("lifecycle: service Stop closing Start-time PCI Open");
             stopDevice->Close(this, 0);
+            vfio_user_dma_log("lifecycle: service Stop Start-time PCI Close returned");
             os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop closed early PCI Open");
+        } else {
+            vfio_user_dma_log("lifecycle: service Stop cannot close Start-time PCI Open: provider unavailable");
         }
     }
     IOSafeDeleteNULL(ivars, VFIOUserPCIDriver_IVars, 1);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop calling super");
+    vfio_user_dma_log("lifecycle: service Stop calling super");
     kern_return_t ret = Stop(provider, SUPERDISPATCH);
+    vfio_user_dma_log("lifecycle: service super Stop returned %#x", ret);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service super Stop returned %#x", ret);
     return ret;
 }
@@ -1591,6 +1612,16 @@ kern_return_t
 IMPL(VFIOUserPCIDriverUserClient, Stop)
 {
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client Stop entered");
+    if (ivars != nullptr) {
+        vfio_user_dma_log(
+            "lifecycle: client Stop entered claimed=%d active_regions=%llu "
+            "active_chunks=%llu dma_buffer=%d interrupts=%d pending_cancels=%u",
+            (int)ivars->claimed, ivars->activeDMARegionCount,
+            ivars->activeDMAChunkCount, (int)(ivars->dmaBuffer != nullptr),
+            (int)ivars->interruptsSetUp, ivars->pendingInterruptCancelCount);
+    } else {
+        vfio_user_dma_log("lifecycle: client Stop entered without state");
+    }
     if (ivars != nullptr &&
         (ivars->activeDMARegionCount != 0 || ivars->dmaCompleteFailureCount != 0)) {
         vfio_user_dma_log(
