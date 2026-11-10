@@ -1286,9 +1286,8 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
 
     /*
      * Ask the dext to allocate a DMA buffer and call PrepareForDMA as a
-     * single operation. This yields a contiguous DMA range because the host
-     * sees one IOBufferMemoryDescriptor rather than many small client
-     * memory descriptors with guard-page gaps between them.
+     * single operation. A single descriptor does not guarantee a contiguous
+     * DMA range; the returned first segment must cover the entire buffer.
      *
      * The buffer is mapped into our address space via IOConnectMapMemory64
      * so we can back a guest MemoryRegion with it.

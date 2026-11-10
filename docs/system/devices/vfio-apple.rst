@@ -97,6 +97,26 @@ In Linux v7.0, ``acpi_arch_dma_setup()`` is an empty inline function on x86;
 the ARM64 ACPI ``_DMA`` setup therefore cannot be assumed to provide an
 address-offset translation on x86.
 
+Linux v7.0 configures PCI DMA via the host bridge's OF or ACPI path. Its OF
+path can attach a ``restricted-dma-pool``; the ACPI configuration path does
+not perform that attachment. Restricted SWIOTLB pools enable both forced
+bouncing and allocation from the pool. In contrast, the default pool's
+``swiotlb=force`` setting alone does not set the restricted pool's
+``for_alloc`` behavior, so it cannot establish that coherent allocations
+also use host-mapped pages. No stock x86 ACPI equivalent is established by
+these probes. Relevant Linux v7.0 sources are
+`PCI DMA configuration <https://github.com/torvalds/linux/blob/v7.0/drivers/pci/pci-driver.c>`_,
+`OF DMA configuration <https://github.com/torvalds/linux/blob/v7.0/drivers/of/device.c>`_,
+`SWIOTLB <https://github.com/torvalds/linux/blob/v7.0/kernel/dma/swiotlb.c>`_,
+and `direct DMA allocation <https://github.com/torvalds/linux/blob/v7.0/kernel/dma/direct.c>`_.
+
+The dext's current buffer allocation requires a PCI claim, and the claim
+enables bus mastering. Clearing the enable bit later is not proof that
+outstanding transactions have drained. A host allocation experiment therefore
+requires a separately established device-quiescence and mapping-lifetime
+protocol before it can safely be run on a physical device; the synthetic
+probes below do not provide one.
+
 To investigate guest RAM visibility without a physical device, boot a
 **separate disposable** stock x86 Linux VM without any Apple VFIO device or
 companion. In addition to its normal boot and disk arguments, configure a
