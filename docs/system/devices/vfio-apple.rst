@@ -352,6 +352,19 @@ semantics differ from ordinary RAM, and this non-executable mapping must not
 be used as guest System RAM or as a supported Linux DMA pool. A pass establishes
 neither guest CPU access nor device DMA, coherency, or safe teardown.
 
+On the tested Intel Mac this paused diagnostic reported an RW mapping for the
+entire 256 MiB DriverKit allocation at ``0x128000000`` and shut down without
+a reported cleanup error. This does not establish that device DMA has drained.
+The guest address is not guaranteed to remain the same on later allocations.
+
+The RW-only mapping is not yet a general HVF RAM solution. For example, HVF's
+dirty-logging protection and write-fault paths request executable permissions
+without accounting for RAM-device regions. The migration blocker prevents
+migration while the allocation exists, but other logging users and execution
+semantics have not been established. A controlled guest CPU test must avoid
+normal System RAM and verify both directions independently before any Linux
+pool or physical-device experiment.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It
