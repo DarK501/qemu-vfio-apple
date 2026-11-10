@@ -15,6 +15,7 @@ PREFIX = r"""
 #include <stdlib.h>
 #include <stddef.h>
 #include <errno.h>
+#include <setjmp.h>
 typedef uint64_t phys_addr_t;
 typedef uint64_t dma_addr_t;
 typedef uint64_t u64;
@@ -22,6 +23,7 @@ typedef uint64_t u64;
 #define U32_MAX UINT32_MAX
 #define DMA_MAPPING_ERROR UINT64_MAX
 #define dev_warn_ratelimited(dev, ...) ((void)(dev))
+#define dev_err(dev, ...) ((void)(dev))
 #define kfree free
 #define IS_ERR(p) (false)
 #define PTR_ERR(p) (-EIO)
@@ -32,6 +34,10 @@ struct apple_dma_map_entry { int unused; };
 static struct dma_window window;
 static bool window_exists;
 static int created, released, published;
+static bool conflict;
+static jmp_buf panic_env;
+static void apple_dma_panic_state(struct device *dev, const char *reason)
+{ (void)dev; (void)reason; longjmp(panic_env, 1); }
 static struct apple_dma_map_entry *apple_dma_alloc_entry(void)
 { return calloc(1, sizeof(struct apple_dma_map_entry)); }
 static void wnd_shape_for(phys_addr_t gpa, size_t size,
@@ -45,11 +51,15 @@ static struct dma_window *wnd_create(struct apple_dma_dev *ad,
 { (void)ad; (void)base; (void)size; created++; window_exists = true; return &window; }
 static void wnd_put(struct apple_dma_dev *ad, struct dma_window *w)
 { (void)ad; assert(w->refcount); w->refcount--; released++; }
-static void apple_dma_publish_entry(struct apple_dma_dev *ad,
+static bool apple_dma_window_conflicts(struct apple_dma_dev *ad, struct dma_window *w)
+{ (void)ad; (void)w; return conflict; }
+static bool apple_dma_publish_entry(struct apple_dma_dev *ad,
                                     struct apple_dma_map_entry *e,
                                     dma_addr_t dma, dma_addr_t orig,
                                     size_t size, struct dma_window *w)
-{ (void)ad; (void)dma; (void)orig; (void)size; (void)w; published++; free(e); }
+{ (void)ad; (void)dma; (void)orig; (void)size; (void)w;
+  if (conflict) return false;
+  published++; free(e); return true; }
 """
 
 SUFFIX = r"""
@@ -70,6 +80,12 @@ int main(void)
     /* A different mask for another API may validly reuse this window. */
     assert(!apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, 0xffff, &out));
     assert(published == 2 && window.refcount == 2 && out == 0x8123);
+    conflict = true;
+    if (!setjmp(panic_env)) {
+        apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, 0xffff, &out);
+        assert(!"overlapping mapping ownership must be fatal");
+    }
+    assert(released == 2 && published == 2 && window.refcount == 3);
 }
 """
 

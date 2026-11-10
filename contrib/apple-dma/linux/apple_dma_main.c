@@ -831,25 +831,50 @@ static bool wnd_put(struct apple_dma_dev *ad, struct dma_window *w)
  *
  * Caller must subsequently either:
  *   - publish via apple_dma_publish_entry() once a window is in hand, or
- *   - kfree() the entry if some other later step (e.g. wnd_create) fails.
+ *   - kfree() the entry if any later step fails.
  */
 static struct apple_dma_map_entry *apple_dma_alloc_entry(void)
 {
 	return kmalloc(sizeof(struct apple_dma_map_entry), GFP_KERNEL);
 }
 
+/* Caller holds batch_lock, so published windows cannot disappear here. */
+static bool apple_dma_window_conflicts(struct apple_dma_dev *ad,
+				       struct dma_window *window)
+{
+	struct apple_dma_map_entry *other;
+	unsigned long flags;
+	bool conflict = false;
+
+	spin_lock_irqsave(&ad->maps_lock, flags);
+	list_for_each_entry(other, &ad->maps, node) {
+		dma_addr_t start;
+
+		if (window == other->window)
+			continue;
+		start = max(window->dma_addr, other->window->dma_addr);
+		if (start - window->dma_addr < window->size &&
+		    start - other->window->dma_addr < other->window->size) {
+			conflict = true;
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&ad->maps_lock, flags);
+	return conflict;
+}
+
 /*
- * Publish a pre-allocated tracking entry. Cannot fail: takes maps_lock,
- * adds to the maps list, bumps the active-mapping counters. Caller must
- * already hold a reference on @window (i.e. window->refcount has been
- * incremented for this entry).
+ * Overlapping addresses may share a window only when they translate to the
+ * same original address. Independent windows have already been checked
+ * under batch_lock before reaching this function.
  */
-static void apple_dma_publish_entry(struct apple_dma_dev *ad,
+static bool apple_dma_publish_entry(struct apple_dma_dev *ad,
 				    struct apple_dma_map_entry *e,
 				    dma_addr_t mapped_dma,
 				    dma_addr_t orig_dma, size_t size,
 				    struct dma_window *window)
 {
+	struct apple_dma_map_entry *other;
 	unsigned long flags;
 
 	e->mapped_dma = mapped_dma;
@@ -858,12 +883,30 @@ static void apple_dma_publish_entry(struct apple_dma_dev *ad,
 	e->window     = window;
 
 	spin_lock_irqsave(&ad->maps_lock, flags);
+	list_for_each_entry(other, &ad->maps, node) {
+		dma_addr_t start = max(mapped_dma, other->mapped_dma);
+		dma_addr_t offset = start - mapped_dma;
+		dma_addr_t other_offset = start - other->mapped_dma;
+
+		if (window != other->window)
+			continue;
+		if (offset >= size || other_offset >= other->size)
+			continue;
+		if (offset > (dma_addr_t)~0 - orig_dma ||
+		    other_offset > (dma_addr_t)~0 - other->orig_dma ||
+		    orig_dma + offset != other->orig_dma + other_offset) {
+			spin_unlock_irqrestore(&ad->maps_lock, flags);
+			return false;
+		}
+	}
 	list_add_tail(&e->node, &ad->maps);
 	spin_unlock_irqrestore(&ad->maps_lock, flags);
 	atomic_inc(&ad->map_count);
 	atomic64_add(size, &ad->map_bytes);
+	return true;
 }
 
+/* Caller holds batch_lock until the host window reference is released. */
 static struct apple_dma_map_entry *
 apple_dma_take(struct apple_dma_dev *ad, dma_addr_t mapped_dma, size_t size)
 {
@@ -1057,12 +1100,12 @@ static int apple_dma_window_address(dma_addr_t window_dma, phys_addr_t base,
  *   1. Allocate the tracking entry first.
  *   2. Look up or create the host-side window.
  *   3. Increment window refcount.
- *   4. Publish the tracking entry — this step is infallible.
+ *   4. Check for overlapping windows, validate and publish the entry.
  *
  * Steps 1, 2 and 3 are all reversible in isolation (kfree the entry,
  * wnd_put the window if we created it, no-op for a hash hit).  The
- * irreversible publish only happens once everything that can fail has
- * succeeded.  This means the map path has no half-built error state
+ * publish only happens after all checks have succeeded. This means the map
+ * path has no half-built error state
  * that could leak a host DMA mapping behind a freed guest page if a
  * late kmalloc fails — the historical shape of this function had
  * exactly that bug.
@@ -1102,6 +1145,11 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 	}
 
 	w->refcount++;
+	if (apple_dma_window_conflicts(ad, w)) {
+		dev_err(dev, "apple_dma: conflicting host DMA window dma=%pad size=%zu\n",
+			&w->dma_addr, w->size);
+		apple_dma_panic_state(dev, "overlapping host DMA windows");
+	}
 	ret = apple_dma_window_address(w->dma_addr, base, gpa, size,
 				       mask, &dma_addr);
 	if (ret) {
@@ -1114,7 +1162,11 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 		return ret;
 	}
 
-	apple_dma_publish_entry(ad, e, dma_addr, orig_dma, size, w);
+	if (!apple_dma_publish_entry(ad, e, dma_addr, orig_dma, size, w)) {
+		dev_err(dev, "apple_dma: conflicting device DMA range dma=%pad size=%zu\n",
+			&dma_addr, size);
+		apple_dma_panic_state(dev, "ambiguous DMA address translation");
+	}
 
 	*out_dma = dma_addr;
 	return 0;
@@ -1187,8 +1239,10 @@ static dma_addr_t apple_dma_unmap_one(struct apple_dma_dev *ad,
 	if (!apple_dma_usable(ad))
 		apple_dma_panic_state(dev, "unmap requested in unusable context");
 	{
-		struct apple_dma_map_entry *e = apple_dma_take(ad, addr, size);
+		struct apple_dma_map_entry *e;
 
+		mutex_lock(&ad->batch_lock);
+		e = apple_dma_take(ad, addr, size);
 		if (!e)
 			apple_dma_panic_state(dev, "unmap: missing mapping");
 
@@ -1197,7 +1251,6 @@ static dma_addr_t apple_dma_unmap_one(struct apple_dma_dev *ad,
 				       (e->mapped_dma - e->window->dma_addr),
 				       size);
 
-		mutex_lock(&ad->batch_lock);
 		apple_dma_release_entry(ad, dev, e);
 		mutex_unlock(&ad->batch_lock);
 
@@ -1492,12 +1545,12 @@ static int apple_dma_map_sg(struct device *dev, struct scatterlist *sg,
 		for_each_sg(sg, s, err_idx, j) {
 			struct apple_dma_map_entry *e;
 
+			mutex_lock(&ad->batch_lock);
 			e = apple_dma_take(ad, sg_map->mapped_dma_addrs[j],
 					   sg_map->sizes[j]);
 			if (!e)
 				apple_dma_panic_state(dev,
 						      "map_sg rollback: missing mapping");
-			mutex_lock(&ad->batch_lock);
 			apple_dma_release_entry(ad, dev, e);
 			mutex_unlock(&ad->batch_lock);
 			kfree(e);
@@ -1571,6 +1624,7 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 		for_each_sg(sg, s, sg_map->nents, i) {
 			struct apple_dma_map_entry *e;
 
+			mutex_lock(&ad->batch_lock);
 			e = apple_dma_take(ad, sg_map->mapped_dma_addrs[i],
 					   sg_map->sizes[i]);
 			if (!e)
@@ -1581,7 +1635,6 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 					       (e->mapped_dma -
 						e->window->dma_addr),
 					       e->size);
-			mutex_lock(&ad->batch_lock);
 			apple_dma_release_entry(ad, dev, e);
 			mutex_unlock(&ad->batch_lock);
 			kfree(e);

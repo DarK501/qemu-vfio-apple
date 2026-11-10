@@ -31,6 +31,7 @@ TESTS = (
     "test_atomic_rejection.py",
     "test_stream_alignment.py",
     "test_stream_rollback.py",
+    "test_mapping_overlap.py",
     "test_sync_range.py",
     "test_connection.py",
     "test_guest_protocol.py",
