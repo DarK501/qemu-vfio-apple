@@ -250,7 +250,15 @@ lengths and offsets. For example, this is synthetic data, not a macOS result::
 For a real candidate, supply the returned segment list and permissions from
 the same prepared host mapping, the size of its CPU mapping, guest page size,
 physical address width, and a complete set of occupied guest physical ranges
-including RAM, PCI apertures, firmware and reserved areas. ``candidate``
+including RAM, PCI apertures, firmware and reserved areas. To check Linux
+memory-hotplug alignment as well, provide ``memory_block_size`` in bytes,
+using the target guest's ``/sys/devices/system/memory/block_size_bytes``
+(which is hexadecimal). For example, ``8000000`` there corresponds to the
+JSON number ``134217728``. Both the DMA address and allocation size must be
+multiples of that block size. If omitted, hotplug alignment is listed as
+unverified. These recorded values must be rechecked against the current live
+allocation and the actual guest; a previous host address is not a reservation.
+``candidate``
 means only that the supplied values pass these necessary checks; it does not
 prove that the range list is complete, firmware can expose the region as RAM,
 Linux can attach it to the target device, or the physical device can safely

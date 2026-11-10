@@ -67,6 +67,8 @@ class PreflightTest(unittest.TestCase):
             lambda x: x["segments"][1].update(length=4095),
             lambda x: x["segments"][0].update(address=(1 << 64) - 1),
             lambda x: x.update(page_size=3000),
+            lambda x: x.update(memory_block_size=3000),
+            lambda x: x.update(memory_block_size=2048),
             lambda x: x.update(device_read=1),
             lambda x: x.pop("occupied_guest_ranges"),
             lambda x: x["occupied_guest_ranges"].append(
@@ -79,6 +81,31 @@ class PreflightTest(unittest.TestCase):
                 proc = run(data)
                 self.assertEqual(proc.returncode, 2, proc.stderr)
                 self.assertIn("dma-pool-preflight:", proc.stderr)
+
+    def test_hotplug_alignment_at_observed_addresses(self):
+        data = sample()
+        data.update(size=0x10000000, cpu_mapping_size=0x10000000,
+                    memory_block_size=0x8000000,
+                    segments=[{"address": 0x120400000,
+                               "length": 0x10000000, "offset": 0}])
+        proc = run(data)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("pool address or size is not memory-hotplug-block aligned",
+                      json.loads(proc.stdout)["failures"])
+        data["segments"][0]["address"] = 0x128000000
+        proc = run(data)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["result"], "candidate")
+        data["size"] = data["cpu_mapping_size"] = data["segments"][0]["length"] = 0x8001000
+        proc = run(data)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("pool address or size is not memory-hotplug-block aligned",
+                      json.loads(proc.stdout)["failures"])
+
+    def test_unspecified_block_size_is_not_verified(self):
+        result = json.loads(run(sample()).stdout)
+        self.assertIn("Linux memory-hotplug-block alignment",
+                      result["not_verified"])
 
 
 if __name__ == "__main__":

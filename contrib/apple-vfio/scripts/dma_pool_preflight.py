@@ -33,6 +33,12 @@ def assess(data):
     page_size = integer(data, "page_size", 1, U64_MAX)
     if page_size & (page_size - 1):
         raise ValueError("page_size must be a power of two")
+    block_size = None
+    if "memory_block_size" in data:
+        block_size = integer(data, "memory_block_size", 1, U64_MAX)
+        if block_size & (block_size - 1) or block_size < page_size:
+            raise ValueError("memory_block_size must be a power of two "
+                             "at least as large as page_size")
     dma_bits = integer(data, "dma_address_bits", 1, 64)
     guest_bits = integer(data, "guest_physical_bits", 1, 64)
     segments = data.get("segments")
@@ -72,6 +78,8 @@ def assess(data):
         failures.append("pool is not readable and writable by the device")
     if start % page_size or size % page_size:
         failures.append("pool address or size is not guest-page aligned")
+    if block_size is not None and (start % block_size or size % block_size):
+        failures.append("pool address or size is not memory-hotplug-block aligned")
     if end > (1 << dma_bits) - 1:
         failures.append("pool exceeds the device DMA address width")
     if end > (1 << guest_bits) - 1:
@@ -87,18 +95,22 @@ def assess(data):
         if start <= other_end and other_start <= end:
             failures.append(f"pool overlaps occupied guest range {index}")
 
+    not_verified = [
+        "occupied guest ranges are complete or remain free at realize time",
+        "guest firmware describes the pool as usable RAM with page metadata",
+        "stock Linux attaches the pool to the intended PCI device",
+        "all streaming, coherent, and other DMA paths use the pool",
+        "host coherency, device quiescence, reset, and teardown are safe",
+    ]
+    if block_size is None:
+        not_verified.append("Linux memory-hotplug-block alignment")
+
     return {
         "result": "rejected" if failures else "candidate",
         "pool_start": start,
         "pool_end_inclusive": end,
         "failures": failures,
-        "not_verified": [
-            "occupied guest ranges are complete or remain free at realize time",
-            "guest firmware describes the pool as usable RAM with page metadata",
-            "stock Linux attaches the pool to the intended PCI device",
-            "all streaming, coherent, and other DMA paths use the pool",
-            "host coherency, device quiescence, reset, and teardown are safe",
-        ],
+        "not_verified": not_verified,
     }
 
 
