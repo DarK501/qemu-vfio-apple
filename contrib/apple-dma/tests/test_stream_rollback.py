@@ -36,7 +36,7 @@ static bool window_exists;
 static int created, released, published;
 static bool conflict;
 static jmp_buf panic_env;
-static void apple_dma_panic_state(struct device *dev, const char *reason)
+static _Noreturn void apple_dma_panic_state(struct device *dev, const char *reason)
 { (void)dev; (void)reason; longjmp(panic_env, 1); }
 static struct apple_dma_map_entry *apple_dma_alloc_entry(void)
 { return calloc(1, sizeof(struct apple_dma_map_entry)); }

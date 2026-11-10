@@ -55,7 +55,7 @@ static bool apple_dma_range_conflicts(struct apple_dma_dev *ad, u64 address,
     (void)ad; (void)size; (void)except;
     return conflict_address && address == conflict_address;
 }
-static void apple_dma_panic_state(struct device *dev, const char *reason)
+static _Noreturn void apple_dma_panic_state(struct device *dev, const char *reason)
 {
     (void)dev; (void)reason;
     longjmp(panic_env, 1);

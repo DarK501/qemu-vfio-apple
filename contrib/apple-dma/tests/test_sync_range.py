@@ -35,7 +35,7 @@ struct apple_dma_dev {
 #define spin_unlock_irqrestore(lock, flags) do { (void)(lock); (void)(flags); } while (0)
 
 static jmp_buf panic_env;
-static void apple_dma_panic_state(struct device *dev, const char *reason)
+static _Noreturn void apple_dma_panic_state(struct device *dev, const char *reason)
 { (void)dev; (void)reason; longjmp(panic_env, 1); }
 """
 
