@@ -25,6 +25,7 @@ TESTS = (
     "test_dma_permissions.py",
     "test_irq_limits.py",
     "test_irq_configure.py",
+    "test_irq_reporting.py",
     "test_rebar.py",
     "test_atomic_rejection.py",
     "test_stream_alignment.py",

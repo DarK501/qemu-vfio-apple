@@ -161,6 +161,11 @@ static void apple_vfio_signal_irqfd(int fd)
     do {
         ret = write(fd, &value, sizeof(value));
     } while (ret < 0 && errno == EINTR);
+    if (ret != sizeof(value)) {
+        error_report("vfio-apple: failed to signal interrupt eventfd "
+                     "(fd=%d, result=%zd, errno=%d)", fd, ret,
+                     ret < 0 ? errno : 0);
+    }
 }
 
 static void apple_vfio_deliver_irq(VFIOPCIDevice *vdev, uint32_t vector)
@@ -205,6 +210,7 @@ static void apple_vfio_irq_handler(void *opaque)
     io_connect_t conn = apple_vfio_connection(vbasedev);
     AppleVFIOState *apple = adev->apple;
     uint64_t pending[4];
+    kern_return_t kr;
     int word;
 
     if (!event_notifier_test_and_clear(&apple->irq_notifier)) {
@@ -215,25 +221,35 @@ static void apple_vfio_irq_handler(void *opaque)
         return;
     }
 
-    if (apple_host_backend()->client->read_pending_irqs(conn, pending) !=
-        KERN_SUCCESS) {
-        apple_host_backend()->client->interrupt_notify_rearm(apple->irq_notify);
-        return;
-    }
+    kr = apple_host_backend()->client->read_pending_irqs(conn, pending);
+    if (kr != KERN_SUCCESS) {
+        error_report("vfio-apple: failed to read pending interrupts (kr=0x%x)",
+                     kr);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "vfio-apple: failed to read pending interrupts (kr=0x%x)\n",
+                      kr);
+    } else {
+        for (word = 0; word < 4; word++) {
+            uint64_t bits = pending[word];
 
-    for (word = 0; word < 4; word++) {
-        uint64_t bits = pending[word];
+            while (bits) {
+                int bit = __builtin_ctzll(bits);
+                uint32_t vector = word * 64 + bit;
 
-        while (bits) {
-            int bit = __builtin_ctzll(bits);
-            uint32_t vector = word * 64 + bit;
-
-            apple_vfio_deliver_irq(vdev, vector);
-            bits &= bits - 1;
+                apple_vfio_deliver_irq(vdev, vector);
+                bits &= bits - 1;
+            }
         }
     }
 
-    apple_host_backend()->client->interrupt_notify_rearm(apple->irq_notify);
+    kr = apple_host_backend()->client->interrupt_notify_rearm(apple->irq_notify);
+    if (kr != KERN_SUCCESS) {
+        error_report("vfio-apple: interrupt notification rearm failed "
+                     "(kr=0x%x); future interrupts may be lost", kr);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "vfio-apple: interrupt notification rearm failed "
+                      "(kr=0x%x); future interrupts may be lost\n", kr);
+    }
 }
 
 bool apple_vfio_get_bar_info(VFIOApplePCIDevice *adev, uint8_t bar,

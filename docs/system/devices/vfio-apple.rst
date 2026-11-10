@@ -182,7 +182,9 @@ Interrupts
 The dext stops interrupt setup if both MSI-X configuration and its MSI
 fallback fail, and reports the failure in the host unified log. A successful
 configuration does not yet establish complete guest-visible masking, pending,
-vector-mode or reset semantics.
+vector-mode or reset semantics. Failed IRQ reads, notification rearming and
+asynchronous notifications are reported in QEMU's guest-errors log; a rearm
+failure can leave subsequent interrupts undelivered.
 
 The dext tracks pending hardware interrupts (MSI/MSI-X) in a bitfield
 (one bit per vector, up to 256 vectors).  When a hardware interrupt fires,

@@ -10,6 +10,8 @@
 #include "qemu/osdep.h"
 
 #include "apple-dext-client.h"
+#include "qemu/error-report.h"
+#include "qemu/log.h"
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -978,9 +980,12 @@ apple_dext_client_read_pending_irqs(io_connect_t connection, uint64_t pending[4]
     if (kr != KERN_SUCCESS) {
         return kr;
     }
+    if (outputCount != 4) {
+        return kIOReturnBadArgument;
+    }
 
     for (i = 0; i < 4; i++) {
-        pending[i] = (i < outputCount) ? output[i] : 0;
+        pending[i] = output[i];
     }
 
     return kIOReturnSuccess;
@@ -1003,6 +1008,12 @@ apple_dext_client_async_callback(void *refcon, IOReturn result,
 
     if (result == kIOReturnSuccess && notify->handler_fn) {
         notify->handler_fn(notify->opaque);
+    } else if (result != kIOReturnSuccess) {
+        error_report("vfio-apple: asynchronous interrupt notification failed "
+                     "(kr=0x%x); future interrupts may be lost", result);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "vfio-apple: asynchronous interrupt notification failed "
+                      "(kr=0x%x); future interrupts may be lost\n", result);
     }
 }
 
