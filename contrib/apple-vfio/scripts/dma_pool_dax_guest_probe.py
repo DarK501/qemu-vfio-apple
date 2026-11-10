@@ -48,6 +48,12 @@ def validate_device(device, offset):
 
 
 def probe(device, offset):
+    raise RuntimeError(
+        "probe disabled: DAX namespace identity, alignment and allocation "
+        "offset are not yet verified")
+
+
+def unverified_probe(device, offset):
     validate_device(device, offset)
     fd = os.open(device, os.O_RDWR | getattr(os, "O_CLOEXEC", 0))
     try:

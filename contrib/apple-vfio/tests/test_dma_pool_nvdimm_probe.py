@@ -39,6 +39,10 @@ class NvdimmProbeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "daxN.N"):
             DAX.validate_device("/dev/mem", 0)
 
+    def test_guest_probe_disabled_before_device_access(self):
+        with self.assertRaisesRegex(RuntimeError, "probe disabled"):
+            DAX.probe("/dev/dax0.0", 0)
+
     def test_qmp_helper_reads_live_value(self):
         with tempfile.TemporaryDirectory() as directory:
             path = str(pathlib.Path(directory) / "qmp.sock")

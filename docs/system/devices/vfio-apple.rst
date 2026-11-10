@@ -276,6 +276,15 @@ disk is used, so no qcow2 overlay is needed for this paused diagnostic.
 Guest CPU access through an NVDIMM
 ----------------------------------
 
+.. warning::
+
+  This procedure is **not ready to run**. HVF aborted in ``hv_vm_map`` when
+  the DriverKit-backed NVDIMM was hot-added on the tested Intel Mac. An abort
+  may bypass normal allocation and claim cleanup. In addition, the DAX
+  namespace's identity, resource offset, and mapping alignment must be
+  validated before comparing it with the host mapping. Do not execute the
+  commands below until the procedure has been corrected.
+
 The host-alias diagnostic does not execute guest CPU instructions. The
 following separate test exposes the same live allocation through QEMU's
 ``nvdimm`` device, creates a Linux ``devdax`` namespace, and tests writes by
@@ -332,7 +341,7 @@ the dedicated DMA allocation, not in the guest disk::
 
   sudo apt-get update
   sudo apt-get install -y ndctl
-  sudo ndctl create-namespace --mode=devdax --force
+  # Do not create a namespace until the target region is positively identified.
   sudo ndctl list -N
 
 Run the guest probe with the ``/dev/daxN.N`` node reported for that namespace
