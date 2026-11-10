@@ -24,6 +24,8 @@ TESTS = (
     "test_irq_limits.py",
     "test_rebar.py",
     "test_atomic_rejection.py",
+    "test_stream_alignment.py",
+    "test_stream_rollback.py",
     "test_connection.py",
     "test_guest_protocol.py",
     "test_mapping.py",

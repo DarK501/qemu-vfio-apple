@@ -1010,6 +1010,27 @@ static void wnd_shape_for(phys_addr_t gpa, size_t size,
 	*out_size = size;
 }
 
+static int apple_dma_window_address(dma_addr_t window_dma, phys_addr_t base,
+				    phys_addr_t gpa, size_t size,
+				    u64 mask, dma_addr_t *out_dma)
+{
+	u64 offset = gpa - base;
+	dma_addr_t dma_addr;
+
+	if (gpa < base || offset > (u64)(dma_addr_t)~0 - window_dma)
+		return -ERANGE;
+
+	dma_addr = window_dma + offset;
+	if (!size || dma_addr == DMA_MAPPING_ERROR || dma_addr > mask ||
+	    size - 1 > mask - dma_addr ||
+	    size - 1 > (u64)(dma_addr_t)~0 - dma_addr ||
+	    (dma_addr & (PAGE_SIZE - 1)) != (gpa & (PAGE_SIZE - 1)))
+		return -ERANGE;
+
+	*out_dma = dma_addr;
+	return 0;
+}
+
 /*
  * Map a single region, routing through the window coalescing layer.
  * Caller must hold ad->batch_lock.
@@ -1038,6 +1059,7 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 	struct dma_window *w;
 	struct apple_dma_map_entry *e;
 	dma_addr_t dma_addr;
+	int ret;
 
 	if (!size || size > U32_MAX || gpa > (phys_addr_t)-1 - (size - 1))
 		return -E2BIG;
@@ -1061,13 +1083,17 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 		}
 	}
 
-	dma_addr = w->dma_addr + (gpa - base);
 	w->refcount++;
-	if (dma_addr == DMA_MAPPING_ERROR || dma_addr > dma_get_mask(dev) ||
-	    size - 1 > dma_get_mask(dev) - dma_addr) {
+	ret = apple_dma_window_address(w->dma_addr, base, gpa, size,
+				       dma_get_mask(dev), &dma_addr);
+	if (ret) {
+		dev_warn_ratelimited(dev,
+			"apple_dma: window address violates mask, offset or range: base=%pap gpa=%pap size=%zu dma=%pad mask=%#llx\n",
+			&base, &gpa, size, &w->dma_addr,
+			(unsigned long long)dma_get_mask(dev));
 		wnd_put(ad, w);
 		kfree(e);
-		return -ERANGE;
+		return ret;
 	}
 
 	apple_dma_publish_entry(ad, e, dma_addr, orig_dma, size, w);

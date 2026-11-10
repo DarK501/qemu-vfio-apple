@@ -87,8 +87,9 @@ The macOS DART imposes limits that do not exist with Linux VFIO:
 - **No IOVA alignment guarantees**: the platform may return any address.
   The guest companion must reject mappings that do not meet the Linux DMA
   API's alignment requirements; coherent allocations now reject misaligned
-  replacement handles. Streaming and GPU-page alignment still require
-  further work.
+  replacement handles. Streaming mappings reject a replacement address
+  whose guest-page offset differs from the original GPA. GPU-page alignment
+  for guest page sizes and devices still requires further validation.
 - **Total DMA memory limit**: approximately 1.5 GB of guest memory can be
   registered for DMA at any time.
 - **Mapping count limit**: approximately 64k concurrent DMA mappings.
