@@ -556,8 +556,8 @@ apple_dext_client_allocate_dma_buffer(io_connect_t connection,
     }
 
     /* A successful allocation must be explicitly released on later errors. */
-    if (outputCount != 6 || output[0] != size || output[2] == 0 ||
-        output[2] > 32 || output[4] == 0 || output[4] > size ||
+    if (outputCount != 6 || output[0] != size || output[2] != 1 ||
+        output[4] < size ||
         output[4] - 1 > UINT64_MAX - output[3]) {
         error_report("vfio-apple: invalid DMA allocation reply");
         kr = kIOReturnError;
@@ -605,6 +605,10 @@ rollback: {
             cleanup = apple_dext_client_free_dma_buffer(connection, addr);
         }
         if (cleanup != KERN_SUCCESS) {
+            if (mapped && out_addr != NULL && out_size != NULL) {
+                *out_addr = addr;
+                *out_size = map_size;
+            }
             error_report("vfio-apple: DMA allocation rollback failed "
                          "(allocation error=0x%x, cleanup error=0x%x); "
                          "device shutdown is not guaranteed safe", kr, cleanup);

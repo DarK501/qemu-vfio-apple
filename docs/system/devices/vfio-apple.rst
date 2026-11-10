@@ -228,6 +228,51 @@ QEMU's x86 machine restricts ``pc-dimm`` placement to its device-memory
 window and applies additional alignment and capacity checks; an arbitrary
 host-selected DMA address is not necessarily usable as a DIMM address.
 
+Live DriverKit-to-QEMU alias diagnostic
+---------------------------------------
+
+The Darwin-only ``memory-backend-apple-dma`` backend and
+``contrib/apple-vfio/scripts/dma_pool_alias_probe.py`` test the next boundary:
+the backend allocates and maps a DriverKit DMA buffer, reports that live
+allocation's device address, then the script asks QEMU to hot-add a ``pc-dimm``
+at exactly that address. It uses a paused TCG machine with no disk and no
+physical PCI device passed to the guest. Qtest writes through QEMU's guest
+physical address space; QMP then checks the same bytes through the backend's
+host mapping, and the reverse direction is checked as well.
+
+The backend retains each allocation until process exit, after VM shutdown and
+an RCU callback drain. It rejects non-single-segment allocations,
+misaligned or overflowing address ranges, incomplete CPU mappings, and
+unsupported guest-memfd or preallocation settings. It also blocks migration
+while the host-backed RAM exists. A failed cleanup is reported and the result
+is not considered a clean test.
+
+This diagnostic still claims the selected host PCI device; DriverKit claim
+enables bus mastering. Run it only when the device is idle and not claimed by
+another process. The probe performs no GPU work and does not add the physical
+PCI device to the VM, but it does not prove that outstanding device DMA has
+drained or that physical DMA is safe. The VM remains paused throughout; a
+passing result proves only that QEMU's guest-physical address space aliases
+the host mapping. It does not test guest CPU/Linux access, guest firmware RAM
+description, restricted-pool attachment, GPU coherency, or DMA safety.
+
+Rebuild the existing Darwin x86_64 QEMU build with VFIO support, refresh
+``dist/``, then run from the repository root (the example uses the previously
+observed BDF and alignment)::
+
+  ninja -C build qemu-system-x86_64
+  ./contrib/apple-vfio/scripts/make-dist.sh
+
+  python3 contrib/apple-vfio/scripts/dma_pool_alias_probe.py \
+    --qemu "$PWD/dist/qemu-system-x86_64" \
+    --firmware "$PWD/dist/share/qemu" \
+    --bdf 44:00.0 --size 0x10000000 --alignment 0x8000000 \
+    --confirm-claim
+
+If the BDF is ambiguous under multiple host PCI roots, add
+``--host-root ROOT_NAME``. The binary must include Qtest support. No guest
+disk is used, so no qcow2 overlay is needed for this paused diagnostic.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It

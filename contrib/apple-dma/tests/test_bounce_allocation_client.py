@@ -98,7 +98,7 @@ int main(void)
     assert(allocate(&bus, &len, &addr, &size) == kIOReturnError);
     assert(cleanups == 1 && cleanup_addr == 0 && !maps && reports == 1);
     reset();
-    reply[2] = 33;
+    reply[2] = 2;
     assert(allocate(&bus, &len, &addr, &size) == kIOReturnError);
     assert(cleanups == 1 && !maps);
     reset();
@@ -110,6 +110,10 @@ int main(void)
     assert(allocate(&bus, &len, &addr, &size) == 0);
     assert(bus == UINT64_MAX - 4095 && len == 4096);
     reset();
+    reply[4] = 8192;
+    assert(allocate(&bus, &len, &addr, &size) == 0);
+    assert(len == 8192);
+    reset();
     mapping_result = 11;
     assert(allocate(&bus, &len, &addr, &size) == 11);
     assert(cleanups == 1 && cleanup_addr == 0);
@@ -117,6 +121,10 @@ int main(void)
     mapped_size = 2048;
     assert(allocate(&bus, &len, &addr, &size) == kIOReturnError);
     assert(cleanups == 1 && cleanup_addr == 0x20000);
+    reset();
+    mapped_size = 2048; cleanup_result = 12;
+    assert(allocate(&bus, &len, &addr, &size) == 12);
+    assert(cleanups == 1 && addr == mapped_addr && size == mapped_size);
     reset();
     mapped_addr = UINTPTR_MAX - 4094;
     assert(allocate(&bus, &len, &addr, &size) == kIOReturnError);
