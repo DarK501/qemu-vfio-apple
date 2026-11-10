@@ -9,10 +9,11 @@
 #include <mach/mach.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define DMA_PROBE_SIZE (256ULL * 1024 * 1024)
-#define DMA_PROBE_ALIGNMENT 4096ULL
+#define DMA_PROBE_DEFAULT_ALIGNMENT 4096ULL
 
 static int parse_device(const char *bdf, const char *id,
                         unsigned int *bus, unsigned int *device,
@@ -103,16 +104,32 @@ static io_service_t find_service(unsigned int bus, unsigned int device,
 int main(int argc, char **argv)
 {
     unsigned int bus = 0, device = 0, function = 0, vendor = 0, product = 0;
+    uint64_t alignment = DMA_PROBE_DEFAULT_ALIGNMENT;
     io_service_t service;
     io_connect_t conn = IO_OBJECT_NULL;
     kern_return_t kr;
     int claimed = 0, allocation_attempted = 0, failed = 0;
 
-    if (argc != 3 ||
+    if ((argc != 3 && argc != 4) ||
         !parse_device(argv[1], argv[2], &bus, &device, &function,
                       &vendor, &product)) {
-        fprintf(stderr, "usage: %s BUS:DEVICE.FUNCTION VENDOR:DEVICE\n", argv[0]);
+        fprintf(stderr, "usage: %s BUS:DEVICE.FUNCTION VENDOR:DEVICE "
+                "[ALIGNMENT]\n", argv[0]);
         return 2;
+    }
+    if (argc == 4) {
+        char *end = NULL;
+        unsigned long long parsed;
+
+        parsed = strtoull(argv[3], &end, 0);
+        if (argv[3][0] == '\0' || end == argv[3] || *end != '\0' ||
+            parsed < DMA_PROBE_DEFAULT_ALIGNMENT ||
+            (parsed & (parsed - 1)) != 0) {
+            fprintf(stderr, "alignment must be a power of two >= %llu\n",
+                    (unsigned long long)DMA_PROBE_DEFAULT_ALIGNMENT);
+            return 2;
+        }
+        alignment = (uint64_t)parsed;
     }
 
     service = find_service(bus, device, function, vendor, product);
@@ -131,7 +148,7 @@ int main(int argc, char **argv)
            bus, device, function, vendor, product);
     printf("Requesting %llu bytes with %llu-byte alignment\n",
            (unsigned long long)DMA_PROBE_SIZE,
-           (unsigned long long)DMA_PROBE_ALIGNMENT);
+           (unsigned long long)alignment);
     fflush(stdout);
 
     kr = IOConnectCallMethod(conn, 1, NULL, 0, NULL, 0, NULL, NULL,
@@ -144,7 +161,7 @@ int main(int argc, char **argv)
     claimed = 1;
 
     {
-        uint64_t input[2] = {DMA_PROBE_SIZE, DMA_PROBE_ALIGNMENT};
+        uint64_t input[2] = {DMA_PROBE_SIZE, alignment};
         uint64_t output[6] = {0};
         uint32_t output_count = 6;
 

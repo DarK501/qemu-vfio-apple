@@ -139,10 +139,11 @@ Build and run the probe from the repository root in the second terminal::
     -framework IOKit -framework CoreFoundation \
     -o /tmp/probe-dma-allocation \
     contrib/apple-vfio/scripts/probe-dma-allocation.c
-  /tmp/probe-dma-allocation BUS:DEVICE.FUNCTION VENDOR:DEVICE
+  /tmp/probe-dma-allocation BUS:DEVICE.FUNCTION VENDOR:DEVICE [ALIGNMENT]
 
 Replace the last arguments with the GPU's exact BDF and hexadecimal PCI ID
-(for example, ``02:00.0 1002:731f``). Stop the log stream with Control-C after
+(for example, ``02:00.0 1002:731f``). The optional alignment is a power of two
+in bytes, defaulting to 4096. Stop the log stream with Control-C after
 the probe exits. The probe output reports the allocation result and segment
 count; the dext log reports each segment's address, length and offset grouped
 by sample ID. Treat those addresses as sensitive. A passing run demonstrates
