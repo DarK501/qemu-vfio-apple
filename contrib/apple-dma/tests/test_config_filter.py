@@ -78,11 +78,13 @@ int main(void)
     assert(apple_vfio_config_write_is_safe(v, 0x6c, 4));
     apple_vfio_cache_physical_rebar(&apple, p->config);
     assert(apple.rebar_scan_valid);
+    assert(apple_vfio_config_write_is_safe(v, 0x100, 4));
     assert(apple_vfio_config_write_is_safe(v, 0x200, 4));
     p->config[0x100] = PCI_EXT_CAP_ID_REBAR;
     p->config[0x108] = 2 << PCI_REBAR_CTRL_NBAR_SHIFT;
     apple_vfio_cache_physical_rebar(&apple, p->config);
     assert(apple.rebar_scan_valid);
+    assert(!apple_vfio_config_write_is_safe(v, 0x100, 4));
     assert(!apple_vfio_config_write_is_safe(v, 0x103, 2));
     assert(!apple_vfio_config_write_is_safe(v, 0x108, 4));
     assert(!apple_vfio_config_write_is_safe(v, 0x110, 4));

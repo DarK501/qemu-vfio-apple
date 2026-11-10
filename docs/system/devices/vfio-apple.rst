@@ -149,6 +149,12 @@ ID. Older guests continue to use GPA-based tokens, and newer guests fall back
 to GPA-based tokens when the feature is not advertised. The feature does not
 make the DMA interception, callback context or teardown paths safe by itself.
 
+On Darwin, QEMU rejects device initialization when its physical PCIe
+extended-capability scan detects an invalid chain or ReBAR layout, rather
+than passing the snapshot to the PCI capability parser. The error appears in
+the QEMU guest-errors log. Writes to the physical ReBAR capability, including
+its header, are blocked; duplicate BAR entries are hidden from the guest.
+
 Guest sync callbacks translate subranges back to the original guest DMA
 mapping and fail fatally if the range has no unambiguous owner. This does not
 establish host-side DMA coherency or ordering.

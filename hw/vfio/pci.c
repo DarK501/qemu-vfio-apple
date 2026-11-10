@@ -2493,6 +2493,8 @@ static int vfio_setup_rebar_ecap(VFIOPCIDevice *vdev, uint16_t pos)
      * hides the whole capability rather than publishing a partial one.
      */
     if (vdev->vbasedev.io_ops->validate_rebar) {
+        unsigned int seen_bars = 0;
+
         if (!nbar || nbar > PCI_ROM_SLOT ||
             pos + PCI_REBAR_CAP + (unsigned int)nbar * 8 > vdev->config_size) {
             return -EINVAL;
@@ -2504,6 +2506,13 @@ static int vfio_setup_rebar_ecap(VFIOPCIDevice *vdev, uint16_t pos)
             bar = ctrl & PCI_REBAR_CTRL_BAR_IDX;
             size = (ctrl & PCI_REBAR_CTRL_BAR_SIZE) >>
                    PCI_REBAR_CTRL_BAR_SHIFT;
+            if (bar >= PCI_ROM_SLOT || (seen_bars & (1U << bar))) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "vfio: invalid or duplicate ReBAR index %u; "
+                              "hiding capability\n", bar);
+                return -EINVAL;
+            }
+            seen_bars |= 1U << bar;
             if (!vdev->vbasedev.io_ops->validate_rebar(&vdev->vbasedev,
                                                         bar, size)) {
                 return -EINVAL;

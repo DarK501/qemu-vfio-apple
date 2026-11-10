@@ -658,8 +658,8 @@ static void apple_vfio_cache_physical_rebar(AppleVFIOState *apple,
                 (next && next > pos && pos + PCI_REBAR_CAP + nbar * 8 > next)) {
                 return;
             }
-            apple->physical_rebar_offset = pos + PCI_REBAR_CAP;
-            apple->physical_rebar_length = nbar * 8;
+            apple->physical_rebar_offset = pos;
+            apple->physical_rebar_length = PCI_REBAR_CAP + nbar * 8;
         }
         pos = next;
     }
@@ -708,8 +708,12 @@ static int apple_vfio_region_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
 
         apple_vfio_cache_physical_rebar(adev->apple, data);
         if (!adev->apple->rebar_scan_valid) {
-            warn_report("vfio-apple: invalid PCIe capability list; "
-                        "extended configuration writes will be blocked");
+            error_report("vfio-apple: invalid physical PCIe capability "
+                         "list; refusing device initialization");
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "vfio-apple: invalid physical PCIe capability "
+                          "list; refusing device initialization\n");
+            return -EINVAL;
         }
     }
     if (legacy_size < size) {

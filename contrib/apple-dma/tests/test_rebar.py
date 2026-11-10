@@ -81,6 +81,9 @@ int main(void)
     v->bars[1].size = v->bars[1].region.size = 256ULL << 20;
     assert(!vfio_setup_rebar_ecap(v, 0x100) && emulated == 4);
     emulated = 0;
+    put32(v->parent.config + 0x110, 8 << 8);
+    assert(vfio_setup_rebar_ecap(v, 0x100) == -EINVAL && !emulated);
+    put32(v->parent.config + 0x110, 1 | (8 << 8));
     v->bars[1].ioport = true;
     assert(vfio_setup_rebar_ecap(v, 0x100) == -EINVAL && !emulated);
     put32(v->parent.config + 0x108, (1 << 5) | (7 | (8 << 8)));
