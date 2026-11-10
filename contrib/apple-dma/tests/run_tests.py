@@ -19,6 +19,7 @@ TESTS = (
     "test_bounce_client.py",
     "test_bar_cache.py",
     "test_config_filter.py",
+    "test_command_decode.py",
     "test_config_snapshot.py",
     "test_alloc_alignment.py",
     "test_dma_permissions.py",

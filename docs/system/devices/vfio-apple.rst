@@ -60,6 +60,11 @@ The implementation consists of several components:
   interrupt notification) goes through IOKit ``IOConnectCallMethod`` calls to
   the dext's ``IOUserClient``.
 
+Guest BAR addresses and the PCI I/O and memory decode bits are virtualized.
+The host retains its physical BARs and decode settings when the guest
+disables decoding to reassign resources. Other command bits, including bus
+mastering, are still forwarded; this is not a DMA readiness gate.
+
 DMA mapping
 -----------
 

@@ -801,6 +801,12 @@ static bool apple_vfio_config_write_is_safe(VFIOPCIDevice *vdev,
     return true;
 }
 
+static void apple_vfio_virtualize_decode(VFIOPCIDevice *vdev)
+{
+    vdev->emulated_config_bits[PCI_COMMAND] |=
+        PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
+}
+
 static int apple_vfio_forward_command_write(io_connect_t conn, off_t off,
                                             uint32_t size, const void *data)
 {
@@ -816,10 +822,35 @@ static int apple_vfio_forward_command_write(io_connect_t conn, off_t off,
 
     for (pos = cmd_start; pos < cmd_end; pos++) {
         uint64_t value = bytes[pos - off];
-        kern_return_t kr = apple_host_backend()->client->config_write(
-            conn, pos, 1, value);
+        kern_return_t kr;
 
+        if (pos == PCI_COMMAND) {
+            uint64_t physical = 0;
+            uint8_t host_decode = PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
+
+            kr = apple_host_backend()->client->config_read(conn, pos, 1,
+                                                            &physical);
+            if (kr != KERN_SUCCESS || physical == 0xff) {
+                error_report("vfio-apple: failed to read physical PCI command "
+                             "before guest write (kr=0x%x)", kr);
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "vfio-apple: cannot preserve physical PCI "
+                              "decode bits (kr=0x%x)\n", kr);
+                return -EIO;
+            }
+            if ((physical ^ value) & host_decode) {
+                qemu_log_mask(LOG_GUEST_ERROR,
+                              "vfio-apple: guest PCI decode=%#x; preserving "
+                              "physical decode=%#x\n",
+                              (unsigned int)value & host_decode,
+                              (unsigned int)physical & host_decode);
+            }
+            value = (value & ~host_decode) | (physical & host_decode);
+        }
+        kr = apple_host_backend()->client->config_write(conn, pos, 1, value);
         if (kr != KERN_SUCCESS) {
+            error_report("vfio-apple: physical PCI command write failed "
+                         "(kr=0x%x)", kr);
             return -EIO;
         }
     }
@@ -1357,6 +1388,13 @@ static void apple_vfio_pci_realize_fn(PCIDevice *pdev, Error **errp)
         g_clear_pointer(&adev->apple, g_free);
         return;
     }
+
+    /*
+     * The guest owns BAR placement and decode state; IOPCIFamily owns the
+     * physical address decoders. Read back the guest's virtual decode bits
+     * while leaving the remaining command bits tied to physical config.
+     */
+    apple_vfio_virtualize_decode(VFIO_PCI_DEVICE(pdev));
 
     if (adev->use_dma_companion) {
         if (!apple_vfio_create_dma_companion(adev, errp)) {

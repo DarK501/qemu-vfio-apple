@@ -18,6 +18,8 @@ PREFIX = r"""
 #define PCI_BASE_ADDRESS_0 16
 #define PCI_BASE_ADDRESS_5 36
 #define PCI_COMMAND 4
+#define PCI_COMMAND_IO 1
+#define PCI_COMMAND_MEMORY 2
 #define PCI_CONFIG_SPACE_SIZE 256
 #define PCIE_CONFIG_SPACE_SIZE 4096
 #define PCI_NUM_REGIONS 7
@@ -43,6 +45,7 @@ typedef struct PCIDevice {
 typedef struct VFIOPCIDevice {
     PCIDevice parent;
     unsigned msi_cap_size;
+    uint8_t emulated_config_bits[PCIE_CONFIG_SPACE_SIZE];
 } VFIOPCIDevice;
 typedef struct AppleVFIOState {
     bool rebar_scan_valid;
@@ -67,6 +70,8 @@ int main(void)
     VFIOApplePCIDevice av = { .apple = &apple };
     VFIOPCIDevice *v = &av.parent;
     PCIDevice *p = &v->parent;
+    apple_vfio_virtualize_decode(v);
+    assert(v->emulated_config_bits[PCI_COMMAND] == 3);
     assert(!apple_vfio_config_write_is_safe(v, PCI_BASE_ADDRESS_0, 4));
     assert(apple_vfio_config_write_is_safe(v, 0x80, 4));
     assert(!apple_vfio_config_write_is_safe(v, 0x200, 4));
