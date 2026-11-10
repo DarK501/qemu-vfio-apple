@@ -96,6 +96,10 @@ at least 4096 bytes; default 4096) to request a suitably aligned DMA address.
 For example, ``dma-bounce-alignment=128M`` requests the 128 MiB alignment that
 Linux x86 memory hotplug reported as necessary in the probe below. This
 property does not add x86 ACPI memory-device or DMA-pool attachment support.
+The dext client rejects malformed allocation replies and CPU mappings shorter
+than the requested buffer, and attempts to complete the allocation if mapping
+fails. A reported cleanup failure means the device's shutdown safety remains
+unverified; it is not evidence that the DMA mapping was released.
 Neither path provides a proven physical bus-master readiness or device-DMA
 drain gate. Do not enable physical guest DMA to evaluate this experiment.
 In Linux v7.0, ``acpi_arch_dma_setup()`` is an empty inline function on x86;

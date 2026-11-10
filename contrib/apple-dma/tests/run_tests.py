@@ -18,6 +18,7 @@ TESTS = (
     "test_dma_buffer.py",
     "test_dma_buffer_segments.py",
     "test_bounce_client.py",
+    "test_bounce_allocation_client.py",
     "test_bar_cache.py",
     "test_config_filter.py",
     "test_command_decode.py",

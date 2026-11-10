@@ -1324,6 +1324,12 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
         return false;
     }
 
+    if (size > UINT64_MAX - bus_addr) {
+        error_setg(errp, "vfio-apple: DMA buffer address range overflows");
+        apple_vfio_free_bounce_buffer(conn, map_addr);
+        return false;
+    }
+
     /* Verify the IOVA range does not collide with existing guest memory */
     MemoryRegionSection mrs = memory_region_find(get_system_memory(),
                                                  bus_addr, size);

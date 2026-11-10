@@ -536,8 +536,12 @@ apple_dext_client_allocate_dma_buffer(io_connect_t connection,
     uint64_t output[6] = {0};
     uint32_t outputCount = 6;
     kern_return_t kr;
+    mach_vm_address_t addr = 0;
+    mach_vm_size_t map_size = 0;
+    bool mapped = false;
 
-    if (connection == IO_OBJECT_NULL) {
+    if (connection == IO_OBJECT_NULL || size == 0 ||
+        ((out_addr == NULL) != (out_size == NULL))) {
         return kIOReturnBadArgument;
     }
 
@@ -551,31 +555,57 @@ apple_dext_client_allocate_dma_buffer(io_connect_t connection,
         return kr;
     }
 
-    /* output[0] = size, [1] = flags, [2] = segCount, [3] = addr, [4] = len */
-    if (out_bus_addr != NULL && outputCount >= 4) {
-        *out_bus_addr = output[3];
-    }
-    if (out_bus_len != NULL && outputCount >= 5) {
-        *out_bus_len = output[4];
+    /* A successful allocation must be explicitly released on later errors. */
+    if (outputCount != 6 || output[0] != size || output[2] == 0 ||
+        output[2] > 32 || output[4] == 0 || output[4] > size) {
+        error_report("vfio-apple: invalid DMA allocation reply");
+        kr = kIOReturnError;
+        goto rollback;
     }
 
-    /* Map the dext-owned buffer into our address space */
     if (out_addr != NULL && out_size != NULL) {
-        mach_vm_address_t addr = 0;
-        mach_vm_size_t map_size = 0;
-
         /* Memory type 0 = kVFIOUserPCIDriverUserClientMemoryTypeDMABuffer */
         kr = IOConnectMapMemory64(connection, 0, mach_task_self(),
                                   &addr, &map_size, kIOMapAnywhere);
         if (kr != KERN_SUCCESS) {
-            return kr;
+            addr = 0;
+            goto rollback;
         }
-
+        mapped = true;
+        if (addr == 0 || map_size < size) {
+            error_report("vfio-apple: invalid DMA buffer CPU mapping "
+                         "(address=0x%" PRIx64 ", size=%" PRIu64 ")",
+                         (uint64_t)addr, (uint64_t)map_size);
+            kr = kIOReturnError;
+            goto rollback;
+        }
         *out_addr = addr;
         *out_size = map_size;
     }
 
+    if (out_bus_addr != NULL) {
+        *out_bus_addr = output[3];
+    }
+    if (out_bus_len != NULL) {
+        *out_bus_len = output[4];
+    }
     return kIOReturnSuccess;
+
+rollback: {
+        kern_return_t cleanup = apple_dext_client_free_dma_buffer(connection,
+                                                                   addr);
+        if (cleanup == KERN_SUCCESS && mapped && addr == 0) {
+            cleanup = IOConnectUnmapMemory64(connection, 0, mach_task_self(),
+                                            addr);
+        }
+        if (cleanup != KERN_SUCCESS) {
+            error_report("vfio-apple: DMA allocation rollback failed "
+                         "(allocation error=0x%x, cleanup error=0x%x); "
+                         "device shutdown is not guaranteed safe", kr, cleanup);
+            return cleanup;
+        }
+        return kr;
+    }
 }
 
 kern_return_t

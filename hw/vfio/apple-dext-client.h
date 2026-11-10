@@ -103,8 +103,9 @@ kern_return_t apple_dext_client_register_dma(io_connect_t connection,
  * Allocate a DMA buffer in the dext and map it into this process.
  *
  * The dext allocates kernel memory (IOBufferMemoryDescriptor) and calls
- * PrepareForDMA once for the entire buffer, yielding a contiguous IOVA.
- * The buffer is then mapped into the caller's address space.
+ * PrepareForDMA once for the entire buffer. The reported first segment need
+ * not cover the whole allocation. The buffer can then be mapped into the
+ * caller's address space.
  *
  * @size:         requested buffer size in bytes
  * @alignment:    alignment in bytes (0 defaults to page size)
