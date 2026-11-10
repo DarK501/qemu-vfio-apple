@@ -179,6 +179,11 @@ enable physical guest DMA until those issues are resolved and validated.
 Interrupts
 ----------
 
+The dext stops interrupt setup if both MSI-X configuration and its MSI
+fallback fail, and reports the failure in the host unified log. A successful
+configuration does not yet establish complete guest-visible masking, pending,
+vector-mode or reset semantics.
+
 The dext tracks pending hardware interrupts (MSI/MSI-X) in a bitfield
 (one bit per vector, up to 256 vectors).  When a hardware interrupt fires,
 the dext sets the corresponding bit and completes an asynchronous

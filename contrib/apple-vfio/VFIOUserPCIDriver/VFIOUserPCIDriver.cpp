@@ -1826,6 +1826,42 @@ vfio_user_reset_device(VFIOUserPCIDriverUserClient *client)
 }
 
 static kern_return_t
+vfio_user_configure_interrupts(IOPCIDevice *pciDevice, bool *usingMSIX,
+                               uint32_t *requested)
+{
+    kern_return_t ret = pciDevice->ConfigureInterrupts(
+        *usingMSIX ? kIOInterruptTypePCIMessagedX : kIOInterruptTypePCIMessaged,
+        1, *requested, 0);
+
+    if (ret == kIOReturnSuccess) {
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: ConfigureInterrupts(%{public}s) requested=%u",
+               *usingMSIX ? "MSI-X" : "MSI", (unsigned int)*requested);
+        return ret;
+    }
+
+    os_log(OS_LOG_DEFAULT,
+           "vfio-user-dext: ConfigureInterrupts(%{public}s, requested=%u) failed: %#x",
+           *usingMSIX ? "MSI-X" : "MSI", (unsigned int)*requested, ret);
+    if (!*usingMSIX) {
+        return ret;
+    }
+
+    *usingMSIX = false;
+    *requested = 1;
+    ret = pciDevice->ConfigureInterrupts(kIOInterruptTypePCIMessaged,
+                                         1, *requested, 0);
+    if (ret != kIOReturnSuccess) {
+        os_log(OS_LOG_DEFAULT,
+               "vfio-user-dext: ConfigureInterrupts(MSI fallback) failed: %#x",
+               ret);
+    } else {
+        os_log(OS_LOG_DEFAULT, "vfio-user-dext: MSI fallback configured");
+    }
+    return ret;
+}
+
+static kern_return_t
 vfio_user_setup_interrupts(VFIOUserPCIDriverUserClient *client)
 {
     if (client == nullptr || client->ivars == nullptr) {
@@ -1900,32 +1936,13 @@ vfio_user_setup_interrupts(VFIOUserPCIDriverUserClient *client)
         requested = VFIO_USER_MAX_IRQ_VECTORS;
     }
 
-    ret = pciDevice->ConfigureInterrupts(usingMSIX ?
-                                         kIOInterruptTypePCIMessagedX :
-                                         kIOInterruptTypePCIMessaged,
-                                         1, requested, 0);
+    ret = vfio_user_configure_interrupts(pciDevice, &usingMSIX, &requested);
     if (ret != kIOReturnSuccess) {
-        os_log(OS_LOG_DEFAULT,
-               "vfio-user-dext: ConfigureInterrupts(%{public}s, requested=%u) failed: %#x",
-               usingMSIX ? "MSI-X" : "MSI",
-               (unsigned int)requested, ret);
-
-        if (usingMSIX) {
-            usingMSIX = false;
-            requested = 1;
-            ret = pciDevice->ConfigureInterrupts(kIOInterruptTypePCIMessaged,
-                                                 1, requested, 0);
-            if (ret != kIOReturnSuccess) {
-                os_log(OS_LOG_DEFAULT,
-                       "vfio-user-dext: ConfigureInterrupts(MSI fallback) failed: %#x",
-                       ret);
-            }
+        kern_return_t cleanupRet = vfio_user_release_all_interrupts(client);
+        if (cleanupRet != kIOReturnSuccess) {
+            return cleanupRet;
         }
-    } else {
-        os_log(OS_LOG_DEFAULT,
-               "vfio-user-dext: ConfigureInterrupts(%{public}s) requested=%u",
-               usingMSIX ? "MSI-X" : "MSI",
-               (unsigned int)requested);
+        return ret;
     }
 
     uint32_t registered = 0;
