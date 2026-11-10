@@ -84,6 +84,89 @@ device, submits map/unmap batches, and translates between guest physical
 addresses and the platform-assigned DMA addresses that the passthrough
 device will use.
 
+Stock-Linux pool feasibility preflight
+--------------------------------------
+
+The existing ``dma-bounce-size`` path is an experimental host-allocated pool,
+not a validated stock-Linux DMA path. Its restricted-pool device-tree wiring
+is specific to the ARM ``virt`` machine; it does not attach a pool to a PCI
+device on an x86 ACPI guest. The app currently enables the companion instead.
+Neither path provides a proven physical bus-master readiness or device-DMA
+drain gate. Do not enable physical guest DMA to evaluate this experiment.
+In Linux v7.0, ``acpi_arch_dma_setup()`` is an empty inline function on x86;
+the ARM64 ACPI ``_DMA`` setup therefore cannot be assumed to provide an
+address-offset translation on x86.
+
+To investigate guest RAM visibility without a physical device, boot a
+**separate disposable** stock x86 Linux VM without any Apple VFIO device or
+companion. In addition to its normal boot and disk arguments, configure a
+synthetic 256 MiB memory device and a local QMP socket in a private directory.
+Set a restrictive process umask (for example ``umask 077``) before starting
+QEMU; QMP grants control of the VM::
+
+  -m 2G,slots=1,maxmem=2304M
+  -object memory-backend-ram,id=poolprobe,size=256M
+  -device pc-dimm,id=poolprobe,memdev=poolprobe
+  -qmp unix:pool-probe-qmp.sock,server=on,wait=off
+
+Connect a QMP client to the socket and, after receiving its greeting, send
+these messages in sequence, waiting for each response::
+
+  {"execute":"qmp_capabilities"}
+  {"execute":"query-memory-devices"}
+
+Record ``data.addr`` and ``data.size`` from the entry whose ``data.id`` is
+``poolprobe``. Copy
+``contrib/apple-vfio/scripts/dma_pool_guest_probe.py`` into the guest and run::
+
+  sudo python3 dma_pool_guest_probe.py <addr> <size>
+
+The arguments can be decimal or prefixed with ``0x``. The probe checks that a
+single unredacted ``System RAM`` entry in ``/proc/iomem`` covers the range
+and reads every page's flags from ``/proc/kpageflags``. A nonzero exit means
+the range was not covered, contains missing/offline pages, or the probe could
+not gather its evidence (including when ``CONFIG_PROC_PAGE_MONITOR`` or
+permissions are missing). Keep its JSON and errors with the QMP result. These
+are ordinary guest RAM pages that Linux may use; the probe does not reserve
+them, establish a linear mapping, or attach a DMA pool. A passing result is
+only a firmware/page-metadata observation. In particular, this synthetic RAM
+is not backed by a DriverKit DMA mapping or a host-selected device address.
+
+The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
+necessary address-layout conditions using recorded or synthetic metadata; it
+does not allocate memory, open a device, start a VM, or validate DMA. It
+accepts a JSON file (or ``-`` for stdin) with unsigned integer byte addresses,
+lengths and offsets. For example, this is synthetic data, not a macOS result::
+
+  {
+    "size": 8192,
+    "cpu_mapping_size": 8192,
+    "page_size": 4096,
+    "dma_address_bits": 44,
+    "guest_physical_bits": 40,
+    "device_read": true,
+    "device_write": true,
+    "segments": [
+      {"address": 4294967296, "length": 8192, "offset": 0}
+    ],
+    "occupied_guest_ranges": [{"start": 0, "size": 4294967296}]
+  }
+
+For a real candidate, supply the returned segment list and permissions from
+the same prepared host mapping, the size of its CPU mapping, guest page size,
+physical address width, and a complete set of occupied guest physical ranges
+including RAM, PCI apertures, firmware and reserved areas. ``candidate``
+means only that the supplied values pass these necessary checks; it does not
+prove that the range list is complete, firmware can expose the region as RAM,
+Linux can attach it to the target device, or the physical device can safely
+use it. Exit status 1 reports a rejected layout and 2 invalid input.
+
+The app's diagnostic export includes guest ``/proc/iomem`` (via ``sudo -n``),
+memory information, CPU information, selected kernel configuration, and
+default SWIOTLB debugfs counters when available. These are diagnostic
+evidence, not an exhaustive QEMU guest address-space map or proof of a
+per-device restricted pool.
+
 Platform constraints
 --------------------
 

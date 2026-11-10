@@ -227,7 +227,7 @@ private enum DiagnosticsRunner {
         let dir = try newDirectory("report")
         var notes = ["Files may contain sensitive host and guest information.",
                      "Host unified logs are collected without sudo and may be incomplete.",
-                     "Guest DMA debugfs collection uses sudo -n and requires debugfs and passwordless permission."]
+                     "Guest DMA debugfs and physical resource collection use sudo -n and require passwordless permission."]
         let jobs: [(String, [String], String)] = [
             ("/usr/bin/sw_vers", [], "host-version"),
             ("/usr/bin/uname", ["-a"], "host-uname"),
@@ -239,6 +239,11 @@ private enum DiagnosticsRunner {
             ("/usr/bin/ssh", ssh.arguments + ["cat /proc/interrupts"], "guest-interrupts"),
             ("/usr/bin/ssh", ssh.arguments + ["cat /proc/cmdline"], "guest-cmdline"),
             ("/usr/bin/ssh", ssh.arguments + ["cat /proc/modules"], "guest-modules"),
+            ("/usr/bin/ssh", ssh.arguments + ["cat /proc/meminfo"], "guest-meminfo"),
+            ("/usr/bin/ssh", ssh.arguments + ["sudo -n cat /proc/iomem"], "guest-iomem"),
+            ("/usr/bin/ssh", ssh.arguments + ["lscpu"], "guest-cpu"),
+            ("/usr/bin/ssh", ssh.arguments + ["sh -c 'if test -r /proc/config.gz; then zcat /proc/config.gz; elif test -r /boot/config-$(uname -r); then cat /boot/config-$(uname -r); else echo \"Kernel configuration is unavailable\" >&2; exit 1; fi | grep -E \"^(CONFIG_(DMA_RESTRICTED_POOL|SWIOTLB|DEBUG_FS|IOMMU_API|VIRTIO_IOMMU|ACPI|PROC_PAGE_MONITOR)=|# CONFIG_(DMA_RESTRICTED_POOL|SWIOTLB|DEBUG_FS|IOMMU_API|VIRTIO_IOMMU|ACPI|PROC_PAGE_MONITOR) is not set)\"'"], "guest-dma-config"),
+            ("/usr/bin/ssh", ssh.arguments + ["sudo -n sh -c 'test -d /sys/kernel/debug/swiotlb || { echo \"SWIOTLB debugfs is unavailable\" >&2; exit 1; }; for f in /sys/kernel/debug/swiotlb/io_tlb_nslabs /sys/kernel/debug/swiotlb/io_tlb_used /sys/kernel/debug/swiotlb/io_tlb_used_hiwater; do printf \"%s: \" \"$f\"; cat \"$f\" || exit 1; done'"], "guest-swiotlb"),
             ("/usr/bin/ssh", ssh.arguments + ["sudo -n cat /sys/kernel/debug/apple_dma/snapshot"], "guest-dma-snapshot"),
             ("/usr/bin/ssh", ssh.arguments + ["sudo -n tail -n 5000 /sys/kernel/debug/apple_dma/trace"], "guest-dma-trace"),
             ("/usr/bin/ssh", ssh.arguments + ["for f in /sys/module/apple_dma/parameters/*; do printf '%s: ' \"$f\"; cat \"$f\" || exit; done"], "guest-dma-parameters")
