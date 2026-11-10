@@ -1069,7 +1069,7 @@ static int apple_dma_window_address(dma_addr_t window_dma, phys_addr_t base,
  */
 static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 				phys_addr_t gpa,
-				size_t size, dma_addr_t orig_dma,
+				size_t size, dma_addr_t orig_dma, u64 mask,
 				dma_addr_t *out_dma)
 {
 	phys_addr_t base;
@@ -1103,12 +1103,12 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 
 	w->refcount++;
 	ret = apple_dma_window_address(w->dma_addr, base, gpa, size,
-				       dma_get_mask(dev), &dma_addr);
+				       mask, &dma_addr);
 	if (ret) {
 		dev_warn_ratelimited(dev,
 			"apple_dma: window address violates mask, offset or range: base=%pap gpa=%pap size=%zu dma=%pad mask=%#llx\n",
 			&base, &gpa, size, &w->dma_addr,
-			(unsigned long long)dma_get_mask(dev));
+			(unsigned long long)mask);
 		wnd_put(ad, w);
 		kfree(e);
 		return ret;
@@ -1122,7 +1122,8 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 
 static int apple_dma_map_one(struct apple_dma_dev *ad, struct device *dev,
 			     phys_addr_t gpa, size_t size,
-			     dma_addr_t orig_dma, dma_addr_t *out_dma)
+			     dma_addr_t orig_dma, u64 mask,
+			     dma_addr_t *out_dma)
 {
 	int ret;
 
@@ -1136,7 +1137,7 @@ static int apple_dma_map_one(struct apple_dma_dev *ad, struct device *dev,
 	}
 
 	mutex_lock(&ad->batch_lock);
-	ret = apple_dma_map_locked(ad, dev, gpa, size, orig_dma, out_dma);
+	ret = apple_dma_map_locked(ad, dev, gpa, size, orig_dma, mask, out_dma);
 	mutex_unlock(&ad->batch_lock);
 
 	if (ret) {
@@ -1234,7 +1235,8 @@ static dma_addr_t apple_dma_map_phys(struct device *dev, phys_addr_t phys,
 	if (dma_mapping_error(dev, orig))
 		return orig;
 
-	ret = apple_dma_map_one(ad, dev, phys, size, orig, &mapped);
+	ret = apple_dma_map_one(ad, dev, phys, size, orig,
+				dma_get_mask(dev), &mapped);
 	if (ret) {
 		if (!ad || !ad->orig_dma_ops)
 			apple_dma_orig_unmap_phys(ad, dev, orig, size, dir, attrs);
@@ -1295,7 +1297,8 @@ static dma_addr_t apple_dma_map_page(struct device *dev, struct page *page,
 	if (dma_mapping_error(dev, orig))
 		return orig;
 
-	ret = apple_dma_map_one(ad, dev, phys, size, orig, &mapped);
+	ret = apple_dma_map_one(ad, dev, phys, size, orig,
+				dma_get_mask(dev), &mapped);
 	if (ret) {
 		if (!ad || !ad->orig_dma_ops)
 			apple_dma_orig_unmap_page(ad, dev, orig, size, dir, attrs);
@@ -1448,7 +1451,8 @@ static int apple_dma_map_sg(struct device *dev, struct scatterlist *sg,
 		int ret;
 
 		ret = apple_dma_map_locked(ad, dev, gpa, size,
-					   sg_map->orig_dma_addrs[i], &out_dma);
+					   sg_map->orig_dma_addrs[i],
+					   dma_get_mask(dev), &out_dma);
 		if (ret) {
 			dev_warn(dev,
 				 "apple_dma: map_sg entry %d/%d failed"
@@ -1615,7 +1619,8 @@ static int apple_dma_remap_alloc(struct apple_dma_dev *ad, struct device *dev,
 			return -ERANGE;
 	}
 
-	ret = apple_dma_map_one(ad, dev, phys, size, orig_dma, &mapped_dma);
+	ret = apple_dma_map_one(ad, dev, phys, size, orig_dma,
+				dev->coherent_dma_mask, &mapped_dma);
 	if (ret)
 		return ret;
 

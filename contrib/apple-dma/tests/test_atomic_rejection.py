@@ -15,6 +15,7 @@ PREFIX = r"""
 #include <stddef.h>
 typedef uint64_t phys_addr_t;
 typedef uint64_t dma_addr_t;
+typedef uint64_t u64;
 enum dma_data_direction { DMA_TO_DEVICE };
 #define DMA_MAPPING_ERROR UINT64_MAX
 #define APPLE_DMA_STAT_MAP 0
@@ -47,9 +48,11 @@ static void apple_dma_orig_unmap_phys(struct apple_dma_dev *ad,
 { (void)ad; (void)dev; (void)addr; (void)size; (void)dir; (void)attrs; }
 static bool dma_mapping_error(struct device *dev, dma_addr_t addr)
 { (void)dev; return addr == DMA_MAPPING_ERROR; }
+static u64 dma_get_mask(struct device *dev) { (void)dev; return UINT64_MAX; }
 static int apple_dma_map_one(struct apple_dma_dev *ad, struct device *dev,
-    phys_addr_t phys, size_t size, dma_addr_t orig, dma_addr_t *out)
-{ (void)ad; (void)dev; (void)size; (void)orig; *out = phys + 4096; return 0; }
+    phys_addr_t phys, size_t size, dma_addr_t orig, u64 mask, dma_addr_t *out)
+{ (void)ad; (void)dev; (void)size; (void)orig; assert(mask == UINT64_MAX);
+  *out = phys + 4096; return 0; }
 """
 
 SUFFIX = r"""

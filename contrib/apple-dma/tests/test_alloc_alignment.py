@@ -16,6 +16,7 @@ PREFIX = r"""
 #include <errno.h>
 typedef uint64_t dma_addr_t;
 typedef uint64_t phys_addr_t;
+typedef uint64_t u64;
 #define PAGE_SHIFT 12
 #define PAGE_SIZE 4096UL
 #define IS_ALIGNED(x, a) (((x) & ((a) - 1)) == 0)
@@ -25,6 +26,7 @@ struct device { uint64_t coherent_dma_mask; };
 struct apple_dma_dev { int unused; };
 static dma_addr_t result;
 static int maps, unmaps, map_error;
+static u64 seen_mask;
 static unsigned int get_order(size_t size)
 {
     size_t pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
@@ -34,10 +36,11 @@ static unsigned int get_order(size_t size)
     return order;
 }
 static int apple_dma_map_one(struct apple_dma_dev *ad, struct device *dev,
-    phys_addr_t phys, size_t size, dma_addr_t orig, dma_addr_t *out)
+    phys_addr_t phys, size_t size, dma_addr_t orig, u64 mask, dma_addr_t *out)
 {
     (void)ad; (void)dev; (void)phys; (void)size; (void)orig;
     maps++;
+    seen_mask = mask;
     *out = result;
     return map_error;
 }
@@ -59,11 +62,12 @@ int main(void)
     dma_addr_t out = 0;
     result = 0x4000;
     assert(!apple_dma_remap_alloc(&ad, &dev, 0, 5000, 0, &out, true));
-    assert(out == result && maps == 1 && unmaps == 0);
+    assert(out == result && maps == 1 && unmaps == 0 && seen_mask == 0xffff);
     result = 0x3000;
     assert(apple_dma_remap_alloc(&ad, &dev, 0, 5000, 0, &out, true) == -ERANGE);
     assert(unmaps == 1);
     assert(!apple_dma_remap_alloc(&ad, &dev, 0, 5000, 0, &out, false));
+    assert(seen_mask == dev.coherent_dma_mask);
     result = 0xf000;
     assert(apple_dma_remap_alloc(&ad, &dev, 0, 8192, 0, &out, true) == -ERANGE);
     assert(unmaps == 2);

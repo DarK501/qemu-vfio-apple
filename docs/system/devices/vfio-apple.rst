@@ -95,6 +95,9 @@ The macOS DART imposes limits that do not exist with Linux VFIO:
   replacement handles. Streaming mappings reject a replacement address
   whose guest-page offset differs from the original GPA. GPU-page alignment
   for guest page sizes and devices still requires further validation.
+- **DMA address masks**: streaming mappings use the device's streaming mask;
+  DMA allocations use its coherent mask. These are currently checked after
+  host mapping and are not yet requested from DriverKit.
 - **Total DMA memory limit**: approximately 1.5 GB of guest memory can be
   registered for DMA at any time.
 - **Mapping count limit**: approximately 64k concurrent DMA mappings.

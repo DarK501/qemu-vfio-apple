@@ -21,7 +21,7 @@ typedef uint64_t u64;
 #define PAGE_SIZE 4096UL
 #define U32_MAX UINT32_MAX
 #define DMA_MAPPING_ERROR UINT64_MAX
-#define dev_warn_ratelimited(...) ((void)0)
+#define dev_warn_ratelimited(dev, ...) ((void)(dev))
 #define kfree free
 #define IS_ERR(p) (false)
 #define PTR_ERR(p) (-EIO)
@@ -32,7 +32,6 @@ struct apple_dma_map_entry { int unused; };
 static struct dma_window window;
 static bool window_exists;
 static int created, released, published;
-static u64 dma_get_mask(struct device *d) { return d->mask; }
 static struct apple_dma_map_entry *apple_dma_alloc_entry(void)
 { return calloc(1, sizeof(struct apple_dma_map_entry)); }
 static void wnd_shape_for(phys_addr_t gpa, size_t size,
@@ -60,14 +59,17 @@ int main(void)
     struct device dev = { .mask = UINT64_MAX };
     dma_addr_t out = 0;
     window.dma_addr = 0x8001;
-    assert(apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, &out) == -ERANGE);
+    assert(apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, dev.mask, &out) == -ERANGE);
     assert(created == 1 && released == 1 && !published && !window.refcount);
     window.dma_addr = 0x8000;
-    assert(!apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, &out));
+    assert(!apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, dev.mask, &out));
     assert(created == 1 && published == 1 && window.refcount == 1 && out == 0x8123);
     dev.mask = 0x8000;
-    assert(apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, &out) == -ERANGE);
+    assert(apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, dev.mask, &out) == -ERANGE);
     assert(released == 2 && published == 1 && window.refcount == 1);
+    /* A different mask for another API may validly reuse this window. */
+    assert(!apple_dma_map_locked(&ad, &dev, 0x1123, 32, 0x1123, 0xffff, &out));
+    assert(published == 2 && window.refcount == 2 && out == 0x8123);
 }
 """
 
