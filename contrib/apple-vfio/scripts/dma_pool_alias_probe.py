@@ -37,7 +37,12 @@ def receive_json(stream):
             return message
 
 
+LAST_COMMAND = None
+
+
 def qmp_command(stream, name, arguments=None):
+    global LAST_COMMAND
+    LAST_COMMAND = name
     request = {"execute": name}
     if arguments is not None:
         request["arguments"] = arguments
@@ -195,6 +200,21 @@ def probe(qemu, firmware, bdf, host_root, timeout, size, alignment):
                         "general host DMA lifecycle safety",
                     ],
                 }
+            except RuntimeError as exc:
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    pass
+                status = process.poll()
+                if status is None:
+                    detail = "QEMU still running"
+                elif status < 0:
+                    detail = f"QEMU killed by signal {-status}"
+                else:
+                    detail = f"QEMU exit status {status}"
+                raise RuntimeError(
+                    f"{exc} (last QMP command: {LAST_COMMAND}; {detail})"
+                ) from exc
             finally:
                 if qmp_stream is not None:
                     qmp_stream.close()
