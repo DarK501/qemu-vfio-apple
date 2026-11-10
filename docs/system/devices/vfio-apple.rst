@@ -309,6 +309,31 @@ device is idle and not claimed elsewhere. HVF may abort again; an abort can
 bypass QEMU cleanup and does not prove outstanding device DMA has drained.
 This comparison does not boot the guest or validate Linux or physical DMA.
 
+On the tested Intel Mac, the synthetic NVDIMM mapped successfully with RWX
+permissions at ``0x128000000``, but the live DriverKit-backed NVDIMM failed
+at the same address, length and permissions. This narrows the difference to
+the allocation or its host mapping but does not establish a specific cause.
+The host-only ``probe-dma-hvf.c`` compares RW and RWX ``hv_vm_map`` requests
+on the same DriverKit mapping and an ordinary anonymous-memory control. It
+creates an HVF VM but no vCPU, does not boot a guest, and does not issue GPU
+work. It claims the GPU and enables bus mastering; an idle device and
+exclusive claim are required. The HVF calls and their cleanup may still fail;
+neither an API success nor a disabled bus-master bit proves DMA safety.
+Build and sign the probe on an Intel Mac from the repository root::
+
+  clang -Wall -Wextra -Werror \
+    -framework Hypervisor -framework IOKit -framework CoreFoundation \
+    -o /tmp/probe-dma-hvf contrib/apple-vfio/scripts/probe-dma-hvf.c
+  codesign --force --sign - --entitlements accel/hvf/entitlements.plist \
+    /tmp/probe-dma-hvf
+  /tmp/probe-dma-hvf 44:00.0 1002:731f
+
+The probe reports return codes for each mapping and unmapping attempt and
+then destroys the HVF VM before releasing the CPU mapping, DMA buffer and
+claim. It requires both ordinary-memory controls and the DriverKit RW map to
+succeed for a complete result; an RWX failure is reported rather than hidden.
+The output can contain host virtual addresses. Review it before sharing.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It
