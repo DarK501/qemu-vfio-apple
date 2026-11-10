@@ -14,7 +14,7 @@ struct DiagnosticsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Host and guest diagnostics").font(.title2)
-            Text("Uses your existing SSH keys and known_hosts. Set up and trust the guest in Terminal first. Logs and command output may contain sensitive data.")
+            Text("Uses your existing SSH keys and known_hosts. Set up and trust the guest in Terminal first. DMA debugfs collection uses non-interactive sudo if available. Logs and command output may contain sensitive data.")
                 .font(.callout).foregroundStyle(.secondary)
             HStack {
                 TextField("SSH host or user@host", text: $host)
@@ -203,7 +203,8 @@ private enum DiagnosticsRunner {
     nonisolated static func collect(ssh: DiagnosticsConnection, destination: URL) throws -> String {
         let dir = try newDirectory("report")
         var notes = ["Files may contain sensitive host and guest information.",
-                     "Host unified logs are collected without sudo and may be incomplete."]
+                     "Host unified logs are collected without sudo and may be incomplete.",
+                     "Guest DMA debugfs collection uses sudo -n and requires debugfs and passwordless permission."]
         let jobs: [(String, [String], String)] = [
             ("/usr/bin/sw_vers", [], "host-version"),
             ("/usr/bin/uname", ["-a"], "host-uname"),
@@ -214,7 +215,10 @@ private enum DiagnosticsRunner {
             ("/usr/bin/ssh", ssh.arguments + ["lspci -nnvv"], "guest-pci"),
             ("/usr/bin/ssh", ssh.arguments + ["cat /proc/interrupts"], "guest-interrupts"),
             ("/usr/bin/ssh", ssh.arguments + ["cat /proc/cmdline"], "guest-cmdline"),
-            ("/usr/bin/ssh", ssh.arguments + ["cat /proc/modules"], "guest-modules")
+            ("/usr/bin/ssh", ssh.arguments + ["cat /proc/modules"], "guest-modules"),
+            ("/usr/bin/ssh", ssh.arguments + ["sudo -n cat /sys/kernel/debug/apple_dma/snapshot"], "guest-dma-snapshot"),
+            ("/usr/bin/ssh", ssh.arguments + ["sudo -n tail -n 5000 /sys/kernel/debug/apple_dma/trace"], "guest-dma-trace"),
+            ("/usr/bin/ssh", ssh.arguments + ["for f in /sys/module/apple_dma/parameters/*; do printf '%s: ' \"$f\"; cat \"$f\" || exit; done"], "guest-dma-parameters")
         ]
         for (binary, args, name) in jobs {
             do {

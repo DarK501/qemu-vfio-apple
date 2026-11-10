@@ -100,7 +100,10 @@ process started by a remote command may continue after SSH disconnects.
 **Export diagnostics** saves a ZIP containing host system information, recent
 unified logs, guest kernel journal, PCI configuration, interrupt counts,
 kernel command line and module state, and up to five recent QEMU guest-errors
-logs. Individual collection failures are reported in the app and
+logs. It also collects the guest DMA debugfs snapshot, the last 5,000 trace
+entries and module parameters. The debugfs reads use `sudo -n`, require
+debugfs and passwordless permission for those commands, and never prompt.
+Individual collection failures are reported in the app and
 the bundle's manifest. Host logs are collected without sudo and may be
 incomplete; guest journal access depends on guest permissions. Files over
 20 MiB are skipped, and a running QEMU log may be incomplete.
