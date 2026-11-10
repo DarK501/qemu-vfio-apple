@@ -114,7 +114,12 @@ bouncing and allocation from the pool. In contrast, the default pool's
 ``swiotlb=force`` setting alone does not set the restricted pool's
 ``for_alloc`` behavior, so it cannot establish that coherent allocations
 also use host-mapped pages. No stock x86 ACPI equivalent is established by
-these probes. Relevant Linux v7.0 sources are
+these probes. Moreover, in Linux v7.0 ``arch/x86/Kconfig`` the only
+``select OF`` entries are the 32-bit ``X86_INTEL_CE`` and ``OLPC`` platforms
+(``X86_64`` is not among them), so a stock x86-64 kernel is expected to lack
+the OF code that restricted pools depend on. Distribution configuration
+should be confirmed with ``CONFIG_OF`` and ``CONFIG_DMA_RESTRICTED_POOL``
+in the guest's kernel config. Relevant Linux v7.0 sources are
 `PCI DMA configuration <https://github.com/torvalds/linux/blob/v7.0/drivers/pci/pci-driver.c>`_,
 `OF DMA configuration <https://github.com/torvalds/linux/blob/v7.0/drivers/of/device.c>`_,
 `SWIOTLB <https://github.com/torvalds/linux/blob/v7.0/kernel/dma/swiotlb.c>`_,
