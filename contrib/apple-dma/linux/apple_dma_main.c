@@ -1080,6 +1080,9 @@ static int apple_dma_map_one(struct apple_dma_dev *ad, struct device *dev,
 		return ret;
 	}
 
+	if (apple_dma_trace_log_all())
+		dev_info(dev, "apple_dma: map gpa=%pap size=%zu dma=%pad\n",
+			 &gpa, size, out_dma);
 	apple_dma_trace_record(ad, APPLE_DMA_TRACE_OP_MAP, gpa, size);
 	return 0;
 }

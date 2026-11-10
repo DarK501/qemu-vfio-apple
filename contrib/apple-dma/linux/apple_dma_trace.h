@@ -32,6 +32,7 @@ void apple_dma_trace_get_window_config(unsigned int *shift, u64 *size);
 unsigned int apple_dma_trace_stat_inc(enum apple_dma_stat_id stat);
 unsigned int apple_dma_trace_stat_get(enum apple_dma_stat_id stat);
 bool apple_dma_trace_should_log(unsigned int count);
+bool apple_dma_trace_log_all(void);
 
 void apple_dma_trace_record(struct apple_dma_dev *ad, u8 op, u64 gpa, u32 size);
 void apple_dma_trace_init(void);

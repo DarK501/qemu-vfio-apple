@@ -41,9 +41,18 @@ unsigned int apple_dma_trace_stat_get(enum apple_dma_stat_id stat)
 	return trace_stats[stat];
 }
 
+static bool log_all;
+module_param(log_all, bool, 0644);
+MODULE_PARM_DESC(log_all, "Log every map with its guest and device addresses");
+
+bool apple_dma_trace_log_all(void)
+{
+	return READ_ONCE(log_all);
+}
+
 bool apple_dma_trace_should_log(unsigned int count)
 {
-	return count <= 8 || (count % 64) == 0;
+	return log_all || count <= 8 || (count % 64) == 0;
 }
 
 void apple_dma_trace_record(struct apple_dma_dev *ad, u8 op, u64 gpa, u32 size)
