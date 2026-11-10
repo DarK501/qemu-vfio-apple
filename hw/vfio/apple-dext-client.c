@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 enum {
     kSelectorGetIdentity        = 0,
@@ -172,9 +173,49 @@ typedef struct DextCandidate {
 
 #define APPLE_DEXT_MAX_CANDIDATES 16
 
-io_connect_t
-apple_dext_client_connect_with_root(uint8_t bus, uint8_t device, uint8_t function,
-                             const char *host_root, char **errp)
+/*
+ * Ask the PCI family to re-probe the device so the dext can attach, as the
+ * host app's claim does.  Returns true once the request was accepted.
+ */
+static bool
+dext_request_rescan(uint8_t bus, uint8_t device, uint8_t function)
+{
+    CFMutableDictionaryRef matching = IOServiceMatching("IOPCIDevice");
+    io_iterator_t iterator = IO_OBJECT_NULL;
+    io_service_t entry;
+    bool requested = false;
+
+    if (matching == NULL ||
+        IOServiceGetMatchingServices(kIOMainPortDefault, matching,
+                                     &iterator) != KERN_SUCCESS) {
+        return false;
+    }
+
+    while (!requested && (entry = IOIteratorNext(iterator)) != IO_OBJECT_NULL) {
+        CFTypeRef ref = IORegistryEntryCreateCFProperty(
+            entry, CFSTR("pcidebug"), kCFAllocatorDefault, 0);
+        if (ref != NULL) {
+            char buf[64];
+            unsigned b, d, f;
+            if (CFGetTypeID(ref) == CFStringGetTypeID() &&
+                CFStringGetCString((CFStringRef)ref, buf, sizeof(buf),
+                                   kCFStringEncodingUTF8) &&
+                sscanf(buf, "%u:%u:%u", &b, &d, &f) == 3 &&
+                b == bus && d == device && f == function) {
+                requested = IOServiceRequestProbe(entry, 0x80200000) ==
+                            KERN_SUCCESS;
+            }
+            CFRelease(ref);
+        }
+        IOObjectRelease(entry);
+    }
+    IOObjectRelease(iterator);
+    return requested;
+}
+
+static io_connect_t
+dext_connect_once(uint8_t bus, uint8_t device, uint8_t function,
+                  const char *host_root, char **errp, bool *no_candidates)
 {
     CFMutableDictionaryRef matching;
     io_iterator_t iterator = IO_OBJECT_NULL;
@@ -234,6 +275,9 @@ apple_dext_client_connect_with_root(uint8_t bus, uint8_t device, uint8_t functio
     IOObjectRelease(iterator);
 
     if (cand_count == 0) {
+        if (no_candidates != NULL) {
+            *no_candidates = true;
+        }
         if (errp != NULL && *errp == NULL) {
         *errp = strdup("no VFIOUserPCIDriver dext instance is bound to "
                        "that BDF — run `qemu-vfio-apple list-devices` to "
@@ -330,6 +374,40 @@ apple_dext_client_connect_with_root(uint8_t bus, uint8_t device, uint8_t functio
     }
 
     return result;
+}
+
+io_connect_t
+apple_dext_client_connect_with_root(uint8_t bus, uint8_t device, uint8_t function,
+                             const char *host_root, char **errp)
+{
+    bool no_candidates = false;
+    io_connect_t conn = dext_connect_once(bus, device, function, host_root,
+                                          errp, &no_candidates);
+
+    if (conn != IO_OBJECT_NULL || !no_candidates ||
+        !dext_request_rescan(bus, device, function)) {
+        return conn;
+    }
+
+    /* Rescan accepted: wait for the dext to attach, then retry. */
+    for (int i = 0; i < 100 && conn == IO_OBJECT_NULL; i++) {
+        usleep(50000);
+        bool none = false;
+        char *retry_err = NULL;
+        conn = dext_connect_once(bus, device, function, host_root,
+                                 &retry_err, &none);
+        if (conn == IO_OBJECT_NULL && !none) {
+            /* attached but another failure: report it */
+            if (errp != NULL) {
+                free(*errp);
+                *errp = retry_err;
+                retry_err = NULL;
+            }
+            break;
+        }
+        free(retry_err);
+    }
+    return conn;
 }
 
 io_connect_t
