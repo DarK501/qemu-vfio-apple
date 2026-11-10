@@ -365,6 +365,45 @@ semantics have not been established. A controlled guest CPU test must avoid
 normal System RAM and verify both directions independently before any Linux
 pool or physical-device experiment.
 
+Bare-metal guest CPU alias diagnostic
+-----------------------------------
+
+``dma_pool_cpu_probe.py`` runs a single bare-metal x86 CPU from a temporary
+minimal firmware, not Linux. It hot-adds a dedicated NVDIMM, maps its first
+2 MiB through guest page tables, and tests eight bytes at offset zero. The
+guest writes one pattern; QEMU is paused before the host checks it and writes
+a different pattern. The guest then reads the host pattern and records it in
+a separate low-RAM mailbox. For the live allocation, QEMU's backend property
+accesses the host mapping; for the synthetic control, Qtest accesses ordinary
+QEMU memory. The runner requires the exact RW-only HVF trace before starting
+the live guest. A host timeout, incorrect value, missing trace, or QEMU
+failure is not a pass.
+
+The scratch qcow2 overlay is persistent and attached read-only. Neither its
+backing file nor the overlay is intended to contain a guest OS or useful data.
+The directory creation below deliberately fails rather than overwrite an
+existing directory. Run from the repository root on the Intel Mac::
+
+  mkdir "$HOME/vfio-dma-cpu-probe" &&
+  ./dist/qemu-img create -f qcow2 "$HOME/vfio-dma-cpu-probe/base.qcow2" 1M &&
+  ./dist/qemu-img create -f qcow2 -F qcow2 \
+    -b "$HOME/vfio-dma-cpu-probe/base.qcow2" \
+    "$HOME/vfio-dma-cpu-probe/overlay.qcow2" &&
+  python3 contrib/apple-vfio/scripts/dma_pool_cpu_probe.py \
+    --qemu "$PWD/dist/qemu-system-x86_64" --firmware "$PWD/dist/share/qemu" \
+    --overlay "$HOME/vfio-dma-cpu-probe/overlay.qcow2" \
+    --address 0x128000000
+
+The synthetic control claims no device. If it succeeds, the same overlay can
+be reused for the live test by replacing ``--address 0x128000000`` with
+``--bdf 44:00.0 --confirm-claim``. The live test uses the current allocation
+address, claims the GPU and enables bus mastering; use an idle, unclaimed
+device. An HVF abort or forced termination may bypass normal QEMU cleanup.
+This tests only guest CPU loads/stores through the experimental RAM-device
+mapping, not Linux, physical GPU DMA, coherency with the GPU, quiescence, or
+general teardown safety. Do not execute code from this buffer or use it as
+System RAM. The emitted trace may include host virtual addresses.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It
