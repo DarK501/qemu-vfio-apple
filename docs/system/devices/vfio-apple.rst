@@ -119,6 +119,36 @@ not proof that outstanding transactions have drained. A host allocation
 experiment therefore requires a separately established device-quiescence and
 mapping-lifetime protocol; the synthetic probes below do not provide one.
 
+For a host-only mapping observation, first shut down any VM using the device,
+release any claim held in the host app, and ensure the GPU is idle. Build and run
+``contrib/apple-vfio/scripts/probe-dma-allocation.c`` from the repository root
+on the Mac. It claims the selected device, asks the dext to prepare a 256 MiB
+DMA buffer, then completes and frees it and releases the claim. It does not
+start a VM or issue device work, but claiming enables bus mastering. The probe
+is not a physical-DMA test and does not establish that the device is safe to
+use for DMA.
+
+Capture dext logs in one terminal before running the probe in another::
+
+  sudo log stream --style compact --level info \
+    --predicate 'eventMessage CONTAINS[c] "vfio-user-dext: DMA buffer"'
+
+Build and run the probe from the repository root in the second terminal::
+
+  clang -Wall -Wextra -Werror \
+    -framework IOKit -framework CoreFoundation \
+    -o /tmp/probe-dma-allocation \
+    contrib/apple-vfio/scripts/probe-dma-allocation.c
+  /tmp/probe-dma-allocation BUS:DEVICE.FUNCTION VENDOR:DEVICE
+
+Replace the last arguments with the GPU's exact BDF and hexadecimal PCI ID
+(for example, ``02:00.0 1002:731f``). Stop the log stream with Control-C after
+the probe exits. The probe output reports the allocation result and segment
+count; the dext log reports each segment's address, length and offset grouped
+by sample ID. Treat those addresses as sensitive. A passing run demonstrates
+only that DriverKit prepared and then completed that host mapping; it does not
+prove guest placement, Linux pool attachment, or physical DMA correctness.
+
 To investigate guest RAM visibility without a physical device, boot a
 **separate disposable** stock x86 Linux VM without any Apple VFIO device or
 companion. In addition to its normal boot and disk arguments, configure a
