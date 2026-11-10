@@ -16,6 +16,7 @@
 #include "hw/vfio/vfio-device.h"
 #include "hw/vfio/vfio-listener.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "system/ramblock.h"
 
 static bool apple_vfio_setup(VFIOContainer *bcontainer, Error **errp)
