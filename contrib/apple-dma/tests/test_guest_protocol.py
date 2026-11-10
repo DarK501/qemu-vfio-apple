@@ -11,6 +11,7 @@ SOURCE = ROOT / "contrib/apple-dma/linux/apple_dma_main.c"
 
 PREFIX = r"""
 #include <assert.h>
+#include <stdbool.h>
 #include <errno.h>
 #include <setjmp.h>
 #include <stdint.h>
@@ -24,6 +25,7 @@ typedef uint64_t phys_addr_t;
 #define cpu_to_le32(x) (x)
 #define le64_to_cpu(x) (x)
 #define le32_to_cpu(x) (x)
+#define min_t(type, a, b) ((type)(a) < (type)(b) ? (type)(a) : (type)(b))
 enum { CMD_MAP = 1, CMD_UNMAP = 2, S_OK = 0, S_IOERR = 1, S_INVAL = 3 };
 struct device { int unused; };
 struct pci_dev { struct device dev; };
@@ -43,8 +45,16 @@ static u32 map_status, unmap_status, unmap_reply_status;
 static u64 unmap_reply_id;
 static u32 command;
 static int unmap_calls;
+static u64 conflict_address;
 static jmp_buf panic_env;
 #define dev_err(...) ((void)0)
+struct dma_window;
+static bool apple_dma_range_conflicts(struct apple_dma_dev *ad, u64 address,
+                                      u64 size, struct dma_window *except)
+{
+    (void)ad; (void)size; (void)except;
+    return conflict_address && address == conflict_address;
+}
 static void apple_dma_panic_state(struct device *dev, const char *reason)
 {
     (void)dev; (void)reason;
@@ -76,6 +86,7 @@ static void prepare(void)
     map_status = unmap_status = unmap_reply_status = S_OK;
     unmap_reply_id = 0x1000;
     unmap_calls = 0;
+    conflict_address = 0;
     reply.status = APPLE_DMA_MAP_STATUS_OK;
     reply.mapping_id = 0x1000;
     reply.segment_count = 2;
@@ -105,6 +116,33 @@ int main(void)
     reply.segments[1].address = 0xb000;
     assert(map(&ad, &token, &dma, &len) == -ERANGE && unmap_calls == 1);
     assert(ad.unmap_req.iova == 0x1000 && ad.unmap_req.size == 4096);
+
+    prepare();
+    reply.segments[1].address = 0xb000;
+    conflict_address = 0xb000;
+    if (!setjmp(panic_env)) {
+        (void)map(&ad, &token, &dma, &len);
+        assert(!"overlapping fragmented response must not be rolled back");
+    }
+    assert(unmap_calls == 0);
+
+    prepare();
+    map_status = S_IOERR;
+    conflict_address = 0x9000;
+    if (!setjmp(panic_env)) {
+        (void)map(&ad, &token, &dma, &len);
+        assert(!"failed batch must not roll back an overlapping mapping");
+    }
+    assert(unmap_calls == 0);
+
+    prepare();
+    reply.segment_count = APPLE_DMA_MAX_SEGMENTS + 1;
+    conflict_address = 0x9800;
+    if (!setjmp(panic_env)) {
+        (void)map(&ad, &token, &dma, &len);
+        assert(!"malformed count must not hide a reported overlap");
+    }
+    assert(unmap_calls == 0);
 
     prepare();
     reply.segments[1].offset = 2049;

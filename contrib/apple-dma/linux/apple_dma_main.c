@@ -597,6 +597,9 @@ static void apple_dma_prepare_cmd(struct apple_dma_dev *ad, u32 type,
 static int apple_dma_device_unmap(struct apple_dma_dev *ad,
 				  u64 iova, u64 size);
 
+static bool apple_dma_range_conflicts(struct apple_dma_dev *ad, u64 address,
+				      u64 size, struct dma_window *except);
+
 static int apple_dma_reject_mapping(struct apple_dma_dev *ad, u64 iova,
 				    u64 size, int error)
 {
@@ -659,10 +662,23 @@ static int apple_dma_device_map(struct apple_dma_dev *ad,
 	if (le64_to_cpu(resp->mapping_id) != expected_id)
 		apple_dma_panic_state(&ad->pdev->dev,
 				      "successful mapping has invalid token");
+	nsegments = le32_to_cpu(resp->segment_count);
+	for (i = 0; i < min_t(u32, nsegments, APPLE_DMA_MAX_SEGMENTS); i++) {
+		u64 address = le64_to_cpu(resp->segments[i].address);
+		u64 length = le64_to_cpu(resp->segments[i].length);
+
+		if (length && apple_dma_range_conflicts(ad, address, length, NULL)) {
+			dev_err(&ad->pdev->dev,
+				"apple_dma: host DMA segment conflicts with live window address=%#llx length=%llu\n",
+				(unsigned long long)address,
+				(unsigned long long)length);
+			apple_dma_panic_state(&ad->pdev->dev,
+					      "overlapping host DMA segments");
+		}
+	}
 	if (status != S_OK)
 		return apple_dma_reject_mapping(ad, expected_id, size, -EIO);
 
-	nsegments = le32_to_cpu(resp->segment_count);
 	if (!nsegments || nsegments > APPLE_DMA_MAX_SEGMENTS)
 		return apple_dma_reject_mapping(ad, expected_id, size, -EIO);
 
@@ -839,8 +855,8 @@ static struct apple_dma_map_entry *apple_dma_alloc_entry(void)
 }
 
 /* Caller holds batch_lock, so published windows cannot disappear here. */
-static bool apple_dma_window_conflicts(struct apple_dma_dev *ad,
-				       struct dma_window *window)
+static bool apple_dma_range_conflicts(struct apple_dma_dev *ad, u64 address,
+				      u64 size, struct dma_window *except)
 {
 	struct apple_dma_map_entry *other;
 	unsigned long flags;
@@ -848,12 +864,12 @@ static bool apple_dma_window_conflicts(struct apple_dma_dev *ad,
 
 	spin_lock_irqsave(&ad->maps_lock, flags);
 	list_for_each_entry(other, &ad->maps, node) {
-		dma_addr_t start;
+		u64 start;
 
-		if (window == other->window)
+		if (except == other->window)
 			continue;
-		start = max(window->dma_addr, other->window->dma_addr);
-		if (start - window->dma_addr < window->size &&
+		start = max(address, (u64)other->window->dma_addr);
+		if (start - address < size &&
 		    start - other->window->dma_addr < other->window->size) {
 			conflict = true;
 			break;
@@ -1145,7 +1161,7 @@ static int apple_dma_map_locked(struct apple_dma_dev *ad, struct device *dev,
 	}
 
 	w->refcount++;
-	if (apple_dma_window_conflicts(ad, w)) {
+	if (apple_dma_range_conflicts(ad, w->dma_addr, w->size, w)) {
 		dev_err(dev, "apple_dma: conflicting host DMA window dma=%pad size=%zu\n",
 			&w->dma_addr, w->size);
 		apple_dma_panic_state(dev, "overlapping host DMA windows");

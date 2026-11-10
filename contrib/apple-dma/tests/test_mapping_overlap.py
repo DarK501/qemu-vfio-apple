@@ -14,6 +14,7 @@ PREFIX = r"""
 #include <stddef.h>
 #include <stdint.h>
 typedef uint64_t dma_addr_t;
+typedef uint64_t u64;
 struct list_head { struct list_head *next, *prev; };
 struct dma_window { dma_addr_t dma_addr; size_t size; };
 struct apple_dma_map_entry {
@@ -55,10 +56,12 @@ int main(void)
     assert(apple_dma_publish_entry(&ad, &a, 0x8000, 0x1000, 4096, &window));
     assert(apple_dma_publish_entry(&ad, &b, 0x8800, 0x1800, 4096, &window));
     assert(!apple_dma_publish_entry(&ad, &c, 0x8800, 0x2800, 4096, &window));
-    assert(apple_dma_window_conflicts(&ad, &other_window));
-    assert(!apple_dma_window_conflicts(&ad, &window));
+    assert(apple_dma_range_conflicts(&ad, other_window.dma_addr, other_window.size, NULL));
+    assert(!apple_dma_range_conflicts(&ad, window.dma_addr, window.size, &window));
     other_window.dma_addr = 0xa000;
-    assert(!apple_dma_window_conflicts(&ad, &other_window));
+    assert(!apple_dma_range_conflicts(&ad, other_window.dma_addr, other_window.size, NULL));
+    assert(apple_dma_range_conflicts(&ad, 0x9fff, 2, NULL));
+    assert(!apple_dma_range_conflicts(&ad, UINT64_MAX - 1, 2, NULL));
     assert(ad.map_count == 2 && ad.map_bytes == 8192);
     assert(apple_dma_publish_entry(&ad, &c, 0xa000, 0x3000, 4096, &window));
     assert(!apple_dma_publish_entry(&ad, &d, 0x7000, 0x3000, 8192, &window));
@@ -76,7 +79,8 @@ int main(void)
 
 def main():
     source = SOURCE.read_text()
-    start = source.index("static bool apple_dma_window_conflicts(")
+    start = source.index("static bool apple_dma_range_conflicts(", source.index(
+        "static struct apple_dma_map_entry *apple_dma_alloc_entry("))
     end = source.index("\nstatic struct apple_dma_map_entry *\napple_dma_take", start)
     for location in ("static dma_addr_t apple_dma_unmap_one(",
                      "if (err_idx >= 0) {",
@@ -88,6 +92,8 @@ def main():
         lock = segment.rfind("mutex_lock(&ad->batch_lock)")
         assert 0 <= lock < segment.index("e = apple_dma_take(")
         assert "mutex_unlock(&ad->batch_lock)" not in segment[lock:]
+        assert "mutex_lock(&ad->batch_lock)" not in segment[
+            segment.index("e = apple_dma_take("):]
     with tempfile.TemporaryDirectory() as tmp:
         test = pathlib.Path(tmp) / "test.c"
         binary = pathlib.Path(tmp) / "test"

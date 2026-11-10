@@ -28,7 +28,7 @@ typedef uint64_t u64;
 #define IS_ERR(p) (false)
 #define PTR_ERR(p) (-EIO)
 struct device { u64 mask; };
-struct dma_window { dma_addr_t dma_addr; unsigned int refcount; };
+struct dma_window { dma_addr_t dma_addr; size_t size; unsigned int refcount; };
 struct apple_dma_dev { int unused; };
 struct apple_dma_map_entry { int unused; };
 static struct dma_window window;
@@ -48,11 +48,12 @@ static struct dma_window *wnd_lookup(struct apple_dma_dev *ad,
 { (void)ad; (void)base; (void)size; return window_exists ? &window : NULL; }
 static struct dma_window *wnd_create(struct apple_dma_dev *ad,
                                      phys_addr_t base, size_t size)
-{ (void)ad; (void)base; (void)size; created++; window_exists = true; return &window; }
+{ (void)ad; (void)base; window.size = size; created++; window_exists = true; return &window; }
 static void wnd_put(struct apple_dma_dev *ad, struct dma_window *w)
 { (void)ad; assert(w->refcount); w->refcount--; released++; }
-static bool apple_dma_window_conflicts(struct apple_dma_dev *ad, struct dma_window *w)
-{ (void)ad; (void)w; return conflict; }
+static bool apple_dma_range_conflicts(struct apple_dma_dev *ad, u64 address,
+                                      u64 size, struct dma_window *w)
+{ (void)ad; (void)address; (void)size; (void)w; return conflict; }
 static bool apple_dma_publish_entry(struct apple_dma_dev *ad,
                                     struct apple_dma_map_entry *e,
                                     dma_addr_t dma, dma_addr_t orig,

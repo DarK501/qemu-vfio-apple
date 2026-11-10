@@ -167,11 +167,12 @@ Guest sync callbacks translate subranges back to the original guest DMA
 mapping and fail fatally if the range has no unambiguous owner. This does not
 establish host-side DMA coherency or ordering.
 
-If successfully returned, contiguous host DMA windows overlap in device
-address space, the guest stops with a fatal error instead of unregistering an
-overlapping window whose effect on the other mapping is unknown. This does not
-cover malformed or failed host mapping responses and is not proof that a guest
-panic or host teardown safely quiesces the device.
+If reported host DMA segments overlap a live window in device address space,
+the guest stops with a fatal error instead of unregistering an overlapping
+window whose effect on the other mapping is unknown. Failed or malformed
+responses may not describe all live segments, so this is not complete overlap
+protection or proof that a guest panic or host teardown safely quiesces the
+device.
 
 The guest module currently fails new streaming mappings in atomic context and
 nonblocking DMA allocations. Unmapping in an atomic or otherwise unusable
