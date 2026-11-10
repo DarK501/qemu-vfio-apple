@@ -557,7 +557,8 @@ apple_dext_client_allocate_dma_buffer(io_connect_t connection,
 
     /* A successful allocation must be explicitly released on later errors. */
     if (outputCount != 6 || output[0] != size || output[2] == 0 ||
-        output[2] > 32 || output[4] == 0 || output[4] > size) {
+        output[2] > 32 || output[4] == 0 || output[4] > size ||
+        output[4] - 1 > UINT64_MAX - output[3]) {
         error_report("vfio-apple: invalid DMA allocation reply");
         kr = kIOReturnError;
         goto rollback;
@@ -572,7 +573,8 @@ apple_dext_client_allocate_dma_buffer(io_connect_t connection,
             goto rollback;
         }
         mapped = true;
-        if (addr == 0 || map_size < size) {
+        if (addr == 0 || map_size < size || addr > UINTPTR_MAX ||
+            size - 1 > UINTPTR_MAX - addr) {
             error_report("vfio-apple: invalid DMA buffer CPU mapping "
                          "(address=0x%" PRIx64 ", size=%" PRIu64 ")",
                          (uint64_t)addr, (uint64_t)map_size);
