@@ -404,6 +404,14 @@ mapping, not Linux, physical GPU DMA, coherency with the GPU, quiescence, or
 general teardown safety. Do not execute code from this buffer or use it as
 System RAM. The emitted trace may include host virtual addresses.
 
+On the tested Intel Mac, the synthetic control (RWX ordinary RAM) and the live
+DriverKit run (RW-only, 256 MiB at ``0x128000000``) both reported guest-write
+and host-write visibility with no reported cleanup error. This shows that a
+guest CPU can load and store through the RW-only HVF mapping of the DriverKit
+allocation and alias the host mapping, for one eight-byte location at offset
+zero. It does not show Linux access, executable use, DMA-pool attachment,
+device DMA, coherency with the GPU, quiescence, or general teardown safety.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It
