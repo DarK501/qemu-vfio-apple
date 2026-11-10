@@ -38,6 +38,7 @@ TESTS = (
     "test_connection.py",
     "test_guest_protocol.py",
     "test_mapping.py",
+    "test_pool_core.py",
     "test_mapping_id_flags.py",
     "test_registration.py",
     "test_dext_registration.py",

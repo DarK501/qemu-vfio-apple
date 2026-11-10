@@ -439,6 +439,20 @@ direction-aware copies, ``map_sg``/``unmap_sg``, ``sync_*``,
 ``dma_supported``, ``get_required_mask`` and ``max_mapping_size``, plus
 ``mmap``/``get_sgtable`` for coherent buffers.
 
+A first skeleton exists in ``contrib/apple-dma/pool/``. It is source-reviewed
+only and has **not been compiled or loaded**: only its page bookkeeping
+(``apple_dma_pool_core.h``) is unit tested, by
+``contrib/apple-dma/tests/test_pool_core.py``. It needs Linux 6.18 or newer
+(``map_phys``) and ``CONFIG_ARCH_HAS_DMA_OPS`` (present in the tested
+Ubuntu ``7.0.0-43-generic`` guest, which lacks ``CONFIG_OF`` and
+``CONFIG_DMA_RESTRICTED_POOL``). It takes ``bdf``, ``pool_base`` and
+``pool_size`` parameters, refuses ranges that overlap System RAM, refuses a
+device that is bound or IOMMU-managed, and pins itself while a driver is
+bound. Streaming maps are not merged and keep the sub-page offset; coherent
+allocations are zeroed and aligned to their page order. The pool range must
+not be claimed by another driver such as a pmem namespace. It does not
+implement ``alloc_pages``.
+
 Open risks, none measured: the pool range arrives as pmem/DAX or reserved
 memory, so memory without ``struct page`` breaks callers that apply
 ``virt_to_page()`` to coherent buffers (the DAX ``kmem`` route would instead
