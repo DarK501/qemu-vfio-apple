@@ -105,8 +105,9 @@ entries and module parameters. The debugfs reads use `sudo -n`, require
 debugfs and passwordless permission for those commands, and never prompt.
 Individual collection failures are reported in the app and
 the bundle's manifest. Host logs are collected without sudo and may be
-incomplete; guest journal access depends on guest permissions. Files over
-20 MiB are skipped, and a running QEMU log may be incomplete.
+incomplete; guest journal access depends on guest permissions. For QEMU logs
+over 20 MiB the export includes the last 20 MiB instead of the full file;
+a running QEMU log may be incomplete.
 
 QEMU guest-errors logs, retained reports and guest-command output are stored
 under `~/Library/Logs/qemu-vfio-apple/`. The QEMU debug log does not capture

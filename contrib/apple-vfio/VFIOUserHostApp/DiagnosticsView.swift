@@ -178,6 +178,7 @@ private enum DiagnosticsRunner {
 
     private nonisolated static func copyQemuLogs(to directory: URL) throws -> [String] {
         let fm = FileManager.default
+        let limit = 20 * 1024 * 1024
         let items = try fm.contentsOfDirectory(at: logRoot,
                                                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey])
             .filter { $0.lastPathComponent.hasPrefix("qemu-") && $0.pathExtension == "log" }
@@ -185,15 +186,37 @@ private enum DiagnosticsRunner {
             .sorted { ($0.1.contentModificationDate ?? .distantPast) > ($1.1.contentModificationDate ?? .distantPast) }
         var notes: [String] = []
         for (url, values) in sorted.prefix(5) {
-            guard let size = values.fileSize, size <= 20 * 1024 * 1024 else {
-                notes.append("Skipped \(url.lastPathComponent): exceeds 20 MiB or size unavailable.")
+            guard let size = values.fileSize else {
+                notes.append("Skipped \(url.lastPathComponent): size unavailable.")
                 continue
             }
             do {
-                try fm.copyItem(at: url, to: directory.appendingPathComponent(url.lastPathComponent))
-                notes.append("Copied \(url.lastPathComponent) (may be incomplete if QEMU is running).")
+                if size <= limit {
+                    try fm.copyItem(at: url, to: directory.appendingPathComponent(url.lastPathComponent))
+                    notes.append("Copied \(url.lastPathComponent) (may be incomplete if QEMU is running).")
+                } else {
+                    let tail = directory.appendingPathComponent(url.lastPathComponent + ".tail")
+                    guard fm.createFile(atPath: tail.path, contents: nil) else {
+                        throw DiagnosticsError.message("Could not create \(tail.lastPathComponent).")
+                    }
+                    let source = try FileHandle(forReadingFrom: url)
+                    defer { try? source.close() }
+                    let target = try FileHandle(forWritingTo: tail)
+                    defer { try? target.close() }
+                    try source.seek(toOffset: UInt64(size - limit))
+                    var remaining = limit
+                    while remaining > 0 {
+                        guard let chunk = try source.read(upToCount: min(remaining, 65536)),
+                              !chunk.isEmpty else {
+                            throw DiagnosticsError.message("Log changed while reading; tail is incomplete.")
+                        }
+                        try target.write(contentsOf: chunk)
+                        remaining -= chunk.count
+                    }
+                    notes.append("Copied last 20 MiB of \(url.lastPathComponent) to \(tail.lastPathComponent); it may start mid-line or omit later writes.")
+                }
             } catch {
-                notes.append("Could not copy \(url.lastPathComponent): \(error.localizedDescription)")
+                notes.append("Could not fully copy \(url.lastPathComponent): \(error.localizedDescription)")
             }
         }
         if sorted.isEmpty { notes.append("No QEMU guest-errors logs found.") }
