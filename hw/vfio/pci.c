@@ -3756,12 +3756,20 @@ static void vfio_exitfn(PCIDevice *pdev)
 
 static int vfio_pci_reset_once(VFIOPCIDevice *vdev)
 {
-    int ret = -ENOTSUP;
+    int ret;
 
-    if (vdev->vbasedev.reset_works && vdev->vbasedev.io_ops &&
-        vdev->vbasedev.io_ops->device_reset) {
-        ret = vdev->vbasedev.io_ops->device_reset(&vdev->vbasedev);
+    if (!vdev->vbasedev.reset_works ||
+        (!vdev->has_flr && vdev->has_pm_reset) ||
+        !vdev->vbasedev.io_ops || !vdev->vbasedev.io_ops->device_reset) {
+        warn_report("vfio-apple: function reset not attempted for %s "
+                    "(reset_available=%d flr=%d pm_reset=%d); no bus or "
+                    "power-management reset was attempted; device readiness "
+                    "is not verified",
+                    vdev->vbasedev.name, vdev->vbasedev.reset_works,
+                    vdev->has_flr, vdev->has_pm_reset);
+        return -ENOTSUP;
     }
+    ret = vdev->vbasedev.io_ops->device_reset(&vdev->vbasedev);
 
     if (ret) {
         warn_report("vfio-apple: one-shot function reset failed for %s "

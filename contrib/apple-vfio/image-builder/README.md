@@ -225,10 +225,15 @@ Interrupt-source cancellation is asynchronous. The client stop retains its
 state and returns `kIOReturnStillOpen` until cancellation completes. A later
 Stop invocation is required to finish cleanup; automatic retry behavior is not
 verified, and DriverKit may still force teardown.
-For Apple VFIO, QEMU performs one DriverKit function-reset request per reset
-event. A failed request is logged with a warning that no bus or power-
-management reset was attempted and manual recovery may be required. The dext
-logs the function-reset attempt and result as `vfio-user-dext: reset:`; it
+For Apple VFIO, QEMU attempts at most one DriverKit function reset per reset
+event. It preserves the previous capability decision for that request: reset
+must be available, and the device must either advertise FLR or lack PM reset.
+Otherwise QEMU reports that no function reset was attempted. Unlike the
+previous implementation, Apple VFIO skips device-specific reset quirks and
+does not fall back to a PM or bus reset. A failed request is logged with a
+warning that no bus or power-management reset was attempted and manual
+recovery may be required. The dext logs the function-reset attempt and result
+as `vfio-user-dext: reset:`; it
 does not automatically escalate to a hot reset. The Apple hot-reset callback
 returns unsupported rather than reporting success without doing a reset. A
 successful function-reset return does not prove the GPU is ready for guest

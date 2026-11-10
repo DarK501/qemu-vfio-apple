@@ -9,6 +9,7 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 PCI = ROOT / "hw/vfio/pci.c"
 APPLE_CONTAINER = ROOT / "hw/vfio/container-apple.c"
+APPLE_DEVICE = ROOT / "hw/vfio/apple-device.c"
 
 PREFIX = r"""
 #include <cassert>
@@ -23,6 +24,8 @@ struct VFIOIOOps {
 };
 struct VFIOPCIDevice {
     VFIODevice vbasedev;
+    bool has_flr;
+    bool has_pm_reset;
 };
 static int reset_calls, reset_result, warnings, infos;
 static int device_reset(VFIODevice *) { reset_calls++; return reset_result; }
@@ -34,7 +37,7 @@ static void info_report(const char *, ...) { infos++; }
 SUFFIX = r"""
 int main()
 {
-    VFIOPCIDevice dev = { { "apple-gpu", true, &io_ops } };
+    VFIOPCIDevice dev = { { "apple-gpu", true, &io_ops }, true, true };
     assert(vfio_pci_reset_once(&dev) == 0);
     assert(reset_calls == 1 && infos == 1 && warnings == 0);
 
@@ -45,6 +48,34 @@ int main()
 
     reset_calls = infos = warnings = 0;
     dev.vbasedev.reset_works = false;
+    assert(vfio_pci_reset_once(&dev) == -ENOTSUP);
+    assert(reset_calls == 0 && infos == 0 && warnings == 1);
+
+    reset_calls = infos = warnings = 0;
+    dev.vbasedev.reset_works = true;
+    dev.has_flr = false;
+    assert(vfio_pci_reset_once(&dev) == -ENOTSUP);
+    assert(reset_calls == 0 && infos == 0 && warnings == 1);
+
+    reset_calls = infos = warnings = 0;
+    dev.has_pm_reset = false;
+    reset_result = 0;
+    assert(vfio_pci_reset_once(&dev) == 0);
+    assert(reset_calls == 1 && infos == 1 && warnings == 0);
+
+    reset_calls = infos = warnings = 0;
+    dev.has_flr = true;
+    assert(vfio_pci_reset_once(&dev) == 0);
+    assert(reset_calls == 1 && infos == 1 && warnings == 0);
+
+    reset_calls = infos = warnings = 0;
+    dev.vbasedev.io_ops = nullptr;
+    assert(vfio_pci_reset_once(&dev) == -ENOTSUP);
+    assert(reset_calls == 0 && infos == 0 && warnings == 1);
+
+    reset_calls = infos = warnings = 0;
+    VFIOIOOps missing_reset = { nullptr };
+    dev.vbasedev.io_ops = &missing_reset;
     assert(vfio_pci_reset_once(&dev) == -ENOTSUP);
     assert(reset_calls == 0 && infos == 0 && warnings == 1);
 
@@ -65,6 +96,10 @@ def main():
     assert reset < generic < post_reset
     assert "vfio_pci_reset_once(vdev);" in pci[reset:generic]
     assert "goto post_reset;" in pci[reset:generic]
+    apple = APPLE_DEVICE.read_text()
+    init_start = apple.index("static void apple_vfio_pci_init(")
+    init_end = apple.index("\n}", init_start)
+    assert "vdev->reset_once = true;" in apple[init_start:init_end]
 
     container = APPLE_CONTAINER.read_text()
     hot_start = container.index("static int apple_vfio_pci_hot_reset(")
