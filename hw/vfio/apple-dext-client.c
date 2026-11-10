@@ -812,7 +812,12 @@ apple_dext_client_map_bar(io_connect_t connection,
      */
     mem_type = 1 + (uint32_t)bar;
 
-    if (bar_type & APPLE_DEXT_BAR_PREFETCHABLE_MASK) {
+    /*
+     * Diagnostic: VFIO_APPLE_BAR_CACHE=default maps prefetchable BARs with
+     * the default cache mode instead of write-combining.
+     */
+    if ((bar_type & APPLE_DEXT_BAR_PREFETCHABLE_MASK) &&
+        g_strcmp0(getenv("VFIO_APPLE_BAR_CACHE"), "default") != 0) {
         opts |= kIOMapWriteCombineCache;
     }
 
