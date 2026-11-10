@@ -132,6 +132,24 @@ them, establish a linear mapping, or attach a DMA pool. A passing result is
 only a firmware/page-metadata observation. In particular, this synthetic RAM
 is not backed by a DriverKit DMA mapping or a host-selected device address.
 
+To test whether QEMU accepts a particular *synthetic* guest address in the
+same x86 memory sizes, run on the host from the repository root::
+
+  python3 contrib/apple-vfio/scripts/dma_pool_placement_probe.py \
+    --qemu "$PWD/dist/qemu-system-x86_64" \
+    --firmware "$PWD/dist/share/qemu" --address 0x100000000
+
+The tool starts a paused TCG VM with no guest disk or passthrough device,
+requests a 256 MiB ``pc-dimm`` at that address, checks the QMP-reported
+address and size, and exits. A launch error includes QEMU stderr; it must
+not automatically be interpreted as an address rejection because other
+startup failures are possible. TCG uses a different CPU model and accelerator
+from an HVF guest, so the resulting address-space layout can differ. This
+does not boot Linux or test DriverKit.
+QEMU's x86 machine restricts ``pc-dimm`` placement to its device-memory
+window and applies additional alignment and capacity checks; an arbitrary
+host-selected DMA address is not necessarily usable as a DIMM address.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It
