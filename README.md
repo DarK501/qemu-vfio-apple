@@ -86,6 +86,32 @@ On first launch from `/Applications`:
 7. Run `qemu-vfio-apple run` to start the VM with your eGPU.
 8. Sign into the Ubuntu user with the password 'ubuntu'
 
+## Diagnostics
+
+The app's **Diagnostics** button opens host/guest log collection and a
+non-interactive guest command runner. Configure an SSH host or alias and port
+(the launcher defaults to `2222`). First set up key authentication and verify
+the guest host key in Terminal; the app uses the host's SSH configuration,
+keys, agent and `known_hosts`, without password prompts or automatic trust.
+Commands run with the SSH user's permissions and cannot use interactive sudo.
+Each collection command and SSH session is stopped after 30 seconds; a guest
+process started by a remote command may continue after SSH disconnects.
+
+**Export diagnostics** saves a ZIP containing host system information, recent
+unified logs, guest kernel journal, PCI configuration, interrupt counts,
+kernel command line and module state, and up to five recent QEMU guest-errors
+logs. Individual collection failures are reported in the app and
+the bundle's manifest. Host logs are collected without sudo and may be
+incomplete; guest journal access depends on guest permissions. Files over
+20 MiB are skipped, and a running QEMU log may be incomplete.
+
+QEMU guest-errors logs, retained reports and guest-command output are stored
+under `~/Library/Logs/qemu-vfio-apple/`. The QEMU debug log does not capture
+all QEMU stderr or the guest serial console. Extra QEMU arguments can override
+the default `-D` and `-d` settings. These files and exports can contain
+sensitive data; review them before sharing and remove old reports when no
+longer needed.
+
 ## Code layout
 
 ```

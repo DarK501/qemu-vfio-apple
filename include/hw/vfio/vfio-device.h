@@ -192,6 +192,13 @@ struct VFIODeviceIOOps {
      */
     uint64_t capabilities;
 
+    /*
+     * Optional backend validation before exposing a fixed-size ReBAR entry.
+     * The size is the PCI ReBAR encoded size, not a byte count.
+     */
+    bool (*validate_rebar)(VFIODevice *vdev, unsigned int bar,
+                           unsigned int size);
+
     /**
      * @device_feature
      *

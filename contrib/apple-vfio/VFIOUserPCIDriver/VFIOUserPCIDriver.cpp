@@ -28,6 +28,12 @@
 #include "VFIOUserPCIDriverUserClient.h"
 #include "../../apple-dma/apple-dma-protocol.h"
 
+static bool
+vfio_user_dma_is_bidirectional(uint64_t flags)
+{
+    return (flags & kIOMemoryDirectionOutIn) == kIOMemoryDirectionOutIn;
+}
+
 enum {
     kVFIOUserPCIDriverUserClientMethodGetIdentity = 0,
     kVFIOUserPCIDriverUserClientMethodClaim = 1,
@@ -776,6 +782,13 @@ vfio_user_allocate_dma_buffer(VFIOUserPCIDriverUserClient *client,
     client->ivars->dmaFlags = dmaFlags;
     client->ivars->dmaSegmentsCount = dmaSegmentsCount;
 
+    if (!vfio_user_dma_is_bidirectional(dmaFlags)) {
+        vfio_user_dma_log("DMA buffer has insufficient direction flags: %#llx",
+                          dmaFlags);
+        ret = vfio_user_release_dma_buffer(client);
+        return ret == kIOReturnSuccess ? kIOReturnUnsupported : ret;
+    }
+
     VFIOUserPCIDeviceIdentity identity;
     if (vfio_user_read_identity(driverService, &identity) == kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT,
@@ -975,6 +988,14 @@ vfio_user_register_client_dma_region(VFIOUserPCIDriverUserClient *client,
         chunk->memoryDescriptor = memDesc;
         chunk->dmaCommand = dmaCmd;
         chunkCount++;
+
+        if (!vfio_user_dma_is_bidirectional(dmaFlags)) {
+            vfio_user_dma_log(
+                "PrepareForDMA returned insufficient direction flags=%#llx "
+                "iova=%#llx", dmaFlags, chunkIOVA);
+            ret = kIOReturnUnsupported;
+            goto rollback;
+        }
 
         if (dmaSegmentsCount == 0 ||
             dmaSegmentsCount > APPLE_DMA_MAX_SEGMENTS) {

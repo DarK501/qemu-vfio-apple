@@ -16,11 +16,13 @@
 
 #include "apple-host-backend.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/pci/msix.h"
 #include "hw/vfio/apple.h"
 #include "hw/vfio/vfio-container.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "qemu/host-pci-mmio.h"
+#include "qemu/log.h"
 #include "qemu/main-loop.h"
 #include "qemu/units.h"
 #include "system/system.h"
@@ -373,6 +375,9 @@ bool apple_vfio_device_setup(VFIOApplePCIDevice *adev, Error **errp)
     }
 
     adev->apple->num_irq_vectors = num_vectors;
+    qemu_log_mask(LOG_GUEST_ERROR,
+                  "vfio-apple: registered host interrupt vectors=%u\n",
+                  num_vectors);
 
     if (event_notifier_init(&adev->apple->irq_notifier, false) < 0) {
         error_setg(errp, "vfio-apple: failed to create IRQ event notifier");
@@ -415,6 +420,39 @@ void apple_vfio_device_cleanup(VFIOApplePCIDevice *adev)
                             NULL, NULL, NULL);
         event_notifier_cleanup(&apple->irq_notifier);
     }
+}
+
+static bool apple_vfio_validate_rebar(VFIODevice *vbasedev, unsigned int bar,
+                                       unsigned int size)
+{
+    VFIOApplePCIDevice *adev = VFIO_APPLE_PCI(vbasedev->dev);
+    VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(adev);
+    uint64_t expected;
+
+    if (bar >= PCI_ROM_SLOT || size > 27) {
+        warn_report("vfio-apple: hiding invalid ReBAR entry BAR%u size=%u",
+                    bar, size);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "vfio-apple: invalid ReBAR BAR%u size=%u; hidden\n",
+                      bar, size);
+        return false;
+    }
+    expected = 1ULL << (size + 20);
+    if (vdev->bars[bar].ioport || vdev->bars[bar].size != expected ||
+        vdev->bars[bar].region.size != expected) {
+        warn_report("vfio-apple: hiding ReBAR: BAR%u size encoding=%u "
+                    "guest=%" PRIu64 " host=%" PRIu64,
+                    bar, size, (uint64_t)vdev->bars[bar].size,
+                    (uint64_t)vdev->bars[bar].region.size);
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "vfio-apple: hiding ReBAR BAR%u size=%u guest=%" PRIu64
+                      " host=%" PRIu64 " io=%u\n", bar, size,
+                      (uint64_t)vdev->bars[bar].size,
+                      (uint64_t)vdev->bars[bar].region.size,
+                      vdev->bars[bar].ioport);
+        return false;
+    }
+    return true;
 }
 
 static int apple_vfio_device_feature(VFIODevice *vdev,
@@ -480,16 +518,15 @@ static int apple_vfio_get_irq_info(VFIODevice *vbasedev,
                                    struct vfio_irq_info *info)
 {
     VFIOApplePCIDevice *adev = VFIO_APPLE_PCI(vbasedev->dev);
-    VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(adev);
 
     switch (info->index) {
     case VFIO_PCI_MSI_IRQ_INDEX:
         info->flags = VFIO_IRQ_INFO_EVENTFD;
-        info->count = adev->apple->num_irq_vectors;
+        info->count = MIN(adev->apple->num_irq_vectors, 256U);
         break;
     case VFIO_PCI_MSIX_IRQ_INDEX:
         info->flags = VFIO_IRQ_INFO_EVENTFD | VFIO_IRQ_INFO_NORESIZE;
-        info->count = vdev->msix ? vdev->msix->entries : 0;
+        info->count = MIN(adev->apple->num_irq_vectors, 256U);
         break;
     case VFIO_PCI_INTX_IRQ_INDEX:
         info->flags = VFIO_IRQ_INFO_EVENTFD;
@@ -512,7 +549,7 @@ static int apple_vfio_get_irq_info(VFIODevice *vbasedev,
     return 0;
 }
 
-static void apple_vfio_update_irq_mask(VFIODevice *vbasedev)
+static int apple_vfio_update_irq_mask(VFIODevice *vbasedev)
 {
     VFIOApplePCIDevice *adev = VFIO_APPLE_PCI(vbasedev->dev);
     VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(adev);
@@ -521,12 +558,21 @@ static void apple_vfio_update_irq_mask(VFIODevice *vbasedev)
     uint32_t i;
 
     if (conn == IO_OBJECT_NULL) {
-        return;
+        return -ENODEV;
     }
 
     switch (vdev->interrupt) {
     case VFIO_INT_MSI:
     case VFIO_INT_MSIX:
+        if (vdev->nr_vectors > MIN(adev->apple->num_irq_vectors,
+                                   ARRAY_SIZE(mask) * 64)) {
+            error_report("vfio-apple: requested %u interrupt vectors, "
+                         "backend can represent at most %u",
+                         vdev->nr_vectors,
+                         (unsigned int)MIN(adev->apple->num_irq_vectors,
+                                           ARRAY_SIZE(mask) * 64));
+            return -EINVAL;
+        }
         for (i = 0; i < vdev->nr_vectors; i++) {
             if (vdev->msi_vectors[i].use) {
                 mask[i / 64] |= 1ULL << (i % 64);
@@ -540,14 +586,16 @@ static void apple_vfio_update_irq_mask(VFIODevice *vbasedev)
         break;
     }
 
-    apple_host_backend()->client->set_irq_mask(conn, mask);
+    if (apple_host_backend()->client->set_irq_mask(conn, mask) != KERN_SUCCESS) {
+        error_report("vfio-apple: failed to update host interrupt mask");
+        return -EIO;
+    }
+    return 0;
 }
 
 static int apple_vfio_set_irqs(VFIODevice *vbasedev, struct vfio_irq_set *irq)
 {
-    apple_vfio_update_irq_mask(vbasedev);
-
-    return 0;
+    return apple_vfio_update_irq_mask(vbasedev);
 }
 
 static int apple_vfio_bar_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
@@ -572,6 +620,50 @@ static int apple_vfio_bar_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
     memcpy(data, &value, size);
 
     return size;
+}
+
+static void apple_vfio_cache_physical_rebar(AppleVFIOState *apple,
+                                             const uint8_t *config)
+{
+    uint16_t pos = PCI_CONFIG_SPACE_SIZE;
+    unsigned int steps = 0;
+
+    apple->rebar_scan_valid = false;
+    apple->physical_rebar_offset = 0;
+    apple->physical_rebar_length = 0;
+    while (pos) {
+        uint32_t header, ctrl, nbar;
+        uint16_t next;
+
+        if (pos < PCI_CONFIG_SPACE_SIZE ||
+            pos > PCIE_CONFIG_SPACE_SIZE - 4 || (pos & 3) ||
+            ++steps > (PCIE_CONFIG_SPACE_SIZE - PCI_CONFIG_SPACE_SIZE) / 4) {
+            return;
+        }
+        header = pci_get_long(config + pos);
+        if (!header) {
+            break;
+        }
+        next = PCI_EXT_CAP_NEXT(header);
+        if (PCI_EXT_CAP_ID(header) == PCI_EXT_CAP_ID_REBAR) {
+            if (apple->physical_rebar_length ||
+                pos > PCIE_CONFIG_SPACE_SIZE - PCI_REBAR_CTRL - 4) {
+                return;
+            }
+            ctrl = pci_get_long(config + pos + PCI_REBAR_CTRL);
+            nbar = (ctrl & PCI_REBAR_CTRL_NBAR_MASK) >>
+                   PCI_REBAR_CTRL_NBAR_SHIFT;
+            if (!nbar || nbar > PCI_NUM_REGIONS - 1 ||
+                pos + PCI_REBAR_CAP + nbar * 8 > PCIE_CONFIG_SPACE_SIZE ||
+                (next && next > pos && pos + PCI_REBAR_CAP + nbar * 8 > next)) {
+                return;
+            }
+            apple->physical_rebar_offset = pos + PCI_REBAR_CAP;
+            apple->physical_rebar_length = nbar * 8;
+        }
+        pos = next;
+    }
+    apple->rebar_scan_valid = true;
 }
 
 static int apple_vfio_region_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
@@ -599,7 +691,6 @@ static int apple_vfio_region_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
         if (kr != KERN_SUCCESS) {
             return -EIO;
         }
-
         memcpy(data, &value, legacy_size);
         if (legacy_size < size) {
             memset((uint8_t *)data + legacy_size, 0, size - legacy_size);
@@ -612,6 +703,15 @@ static int apple_vfio_region_read(VFIODevice *vbasedev, uint8_t nr, off_t off,
     if (kr != KERN_SUCCESS) {
         return -EIO;
     }
+    if (off == 0 && legacy_size == PCIE_CONFIG_SPACE_SIZE) {
+        VFIOApplePCIDevice *adev = VFIO_APPLE_PCI(vbasedev->dev);
+
+        apple_vfio_cache_physical_rebar(adev->apple, data);
+        if (!adev->apple->rebar_scan_valid) {
+            warn_report("vfio-apple: invalid PCIe capability list; "
+                        "extended configuration writes will be blocked");
+        }
+    }
     if (legacy_size < size) {
         memset((uint8_t *)data + legacy_size, 0, size - legacy_size);
     }
@@ -622,6 +722,8 @@ static bool apple_vfio_config_write_is_safe(VFIOPCIDevice *vdev,
                                             off_t off, uint32_t size)
 {
     PCIDevice *pdev = PCI_DEVICE(vdev);
+    VFIOApplePCIDevice *adev = VFIO_APPLE_PCI(pdev);
+    AppleVFIOState *apple = adev->apple;
     off_t end = off + size;
 
     /*
@@ -630,8 +732,7 @@ static bool apple_vfio_config_write_is_safe(VFIOPCIDevice *vdev,
      * them from the guest breaks the IOKit mapping and the device
      * "falls off the bus."
      *
-     * Everything else (vendor capabilities, MSI-X control, PCIe cap,
-     * etc.) is forwarded.
+     * Other writes are forwarded unless explicitly filtered below.
      */
 
     /* PCI_STATUS stays emulated/blocked */
@@ -656,6 +757,27 @@ static bool apple_vfio_config_write_is_safe(VFIOPCIDevice *vdev,
     if (pdev->cap_present & QEMU_PCI_CAP_MSI && pdev->msi_cap != 0 &&
         ranges_overlap(off, size, pdev->msi_cap,
                        vdev->msi_cap_size ? vdev->msi_cap_size : 0x18)) {
+        return false;
+    }
+
+    /*
+     * MSI-X configuration belongs to the guest's interrupt controller;
+     * the host has already configured physical interrupt routing.
+     */
+    if (pdev->cap_present & QEMU_PCI_CAP_MSIX && pdev->msix_cap != 0 &&
+        ranges_overlap(off, size, pdev->msix_cap, MSIX_CAP_LENGTH)) {
+        return false;
+    }
+
+    /*
+     * QEMU exposes only the current BAR size. Even a same-size guest write
+     * must not reprogram the physical device outside the host PCI manager.
+     */
+    if (end > PCI_CONFIG_SPACE_SIZE &&
+        (!apple->rebar_scan_valid ||
+         (apple->physical_rebar_length &&
+          ranges_overlap(off, size, apple->physical_rebar_offset,
+                         apple->physical_rebar_length)))) {
         return false;
     }
 
@@ -866,6 +988,7 @@ static void apple_vfio_region_unmap(VFIODevice *vbasedev, VFIORegion *region)
 }
 
 VFIODeviceIOOps apple_vfio_device_io_ops = {
+    .validate_rebar = apple_vfio_validate_rebar,
     .device_feature = apple_vfio_device_feature,
     .get_region_info = apple_vfio_get_region_info,
     .get_irq_info = apple_vfio_get_irq_info,

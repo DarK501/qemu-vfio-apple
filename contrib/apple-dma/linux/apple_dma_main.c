@@ -21,6 +21,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/list.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
@@ -90,6 +91,7 @@ MODULE_AUTHOR("QEMU apple-dma");
 #define REG_CMD_GPA_LO		0x10
 #define REG_CMD_GPA_HI		0x14
 #define REG_DOORBELL		0x18
+#define REG_FEATURES		0x1C
 
 #define APPLE_DMA_VERSION	APPLE_DMA_PROTOCOL_VERSION
 
@@ -232,6 +234,8 @@ struct apple_dma_dev {
 	const struct dma_map_ops *orig_dma_ops;
 	u16 managed_bdf;
 	u32 max_entries;
+	u32 features;
+	u32 next_mapping_id;
 	bool ready;
 	bool hooked;		/* dma_ops hook installed on managed_pdev */
 	atomic_t map_count;	/* number of active mappings */
@@ -378,6 +382,17 @@ static bool apple_dma_usable(struct apple_dma_dev *ad)
 	/* Batch submission holds a mutex — cannot be in atomic context. */
 	if (in_atomic() || irqs_disabled())
 		return false;
+	return true;
+}
+
+static bool apple_dma_map_context_supported(struct apple_dma_dev *ad,
+					    struct device *dev)
+{
+	if (!apple_dma_usable(ad)) {
+		dev_warn_ratelimited(dev,
+			"apple_dma: cannot create mapping in this context or lifecycle state\n");
+		return false;
+	}
 	return true;
 }
 
@@ -607,10 +622,21 @@ static int apple_dma_device_map(struct apple_dma_dev *ad,
 	u32 nsegments;
 	u32 i;
 	u32 status;
+	u64 expected_id = gpa;
 
 	req->gpa = cpu_to_le64(gpa);
 	req->len = cpu_to_le32(size);
 	req->flags = 0;
+	if (ad->features & APPLE_DMA_FEATURE_MAPPING_ID) {
+		if (ad->next_mapping_id == APPLE_DMA_MAP_ID_MASK) {
+			dev_err(&ad->pdev->dev, "apple_dma: mapping IDs exhausted\n");
+			return -ENOSPC;
+		}
+		ad->next_mapping_id++;
+		req->flags = cpu_to_le32(APPLE_DMA_MAP_FLAG_MAPPING_ID |
+					 ad->next_mapping_id);
+		expected_id = APPLE_DMA_MAP_ID_PREFIX | ad->next_mapping_id;
+	}
 	memset(resp, 0, sizeof(*resp));
 
 	apple_dma_prepare_cmd(ad, CMD_MAP, req, resp);
@@ -620,27 +646,27 @@ static int apple_dma_device_map(struct apple_dma_dev *ad,
 		return -EINVAL;
 
 	if (le32_to_cpu(resp->status) == APPLE_DMA_MAP_STATUS_RETAINED) {
-		if (le64_to_cpu(resp->mapping_id) != gpa)
+		if (le64_to_cpu(resp->mapping_id) != expected_id)
 			apple_dma_panic_state(&ad->pdev->dev,
 					      "retained mapping has invalid token");
-		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
+		return apple_dma_reject_mapping(ad, expected_id, size, -EIO);
 	}
 	if (le32_to_cpu(resp->status) == APPLE_DMA_MAP_STATUS_ERROR)
 		return -EIO;
 	if (le32_to_cpu(resp->status) != APPLE_DMA_MAP_STATUS_OK)
 		apple_dma_panic_state(&ad->pdev->dev,
 				      "unknown DMA map status; mapping may be live");
+	if (le64_to_cpu(resp->mapping_id) != expected_id)
+		apple_dma_panic_state(&ad->pdev->dev,
+				      "successful mapping has invalid token");
 	if (status != S_OK)
-		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
+		return apple_dma_reject_mapping(ad, expected_id, size, -EIO);
 
 	nsegments = le32_to_cpu(resp->segment_count);
 	if (!nsegments || nsegments > APPLE_DMA_MAX_SEGMENTS)
-		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
+		return apple_dma_reject_mapping(ad, expected_id, size, -EIO);
 
 	*out_iova = le64_to_cpu(resp->mapping_id);
-	if (*out_iova != gpa)
-		return apple_dma_reject_mapping(ad, gpa, size, -EIO);
-
 	for (i = 0; i < nsegments; i++) {
 		u64 address = le64_to_cpu(resp->segments[i].address);
 		u64 length = le64_to_cpu(resp->segments[i].length);
@@ -1105,15 +1131,17 @@ static void apple_dma_release_entry(struct apple_dma_dev *ad,
 
 /*
  * Common unmap path: take entry, trace, release, return orig_dma.
- * Returns the original DMA address, or @addr if device is not ready.
+ * Returns the original DMA address only after the host mapping is removed.
  */
 static dma_addr_t apple_dma_unmap_one(struct apple_dma_dev *ad,
 				      struct device *dev, dma_addr_t addr,
 				      size_t size, u8 trace_op)
 {
-	dma_addr_t orig = addr;
+	dma_addr_t orig;
 
-	if (ad && ad->ready) {
+	if (!apple_dma_usable(ad))
+		apple_dma_panic_state(dev, "unmap requested in unusable context");
+	{
 		struct apple_dma_map_entry *e = apple_dma_take(ad, addr, size);
 
 		if (!e)
@@ -1148,6 +1176,9 @@ static dma_addr_t apple_dma_map_phys(struct device *dev, phys_addr_t phys,
 	if (apple_dma_trace_should_log(count))
 		dev_info(dev, "apple_dma: map_phys #%u phys=%pap size=%zu\n",
 			 count, &phys, size);
+
+	if (!apple_dma_map_context_supported(ad, dev))
+		return DMA_MAPPING_ERROR;
 
 	if (!ad || !ad->orig_dma_ops)
 		orig = apple_dma_orig_map_phys(ad, dev, phys, size, dir, attrs);
@@ -1204,6 +1235,9 @@ static dma_addr_t apple_dma_map_page(struct device *dev, struct page *page,
 	if (apple_dma_trace_should_log(count))
 		dev_info(dev, "apple_dma: map_page #%u phys=%pap size=%zu\n",
 			 count, &phys, size);
+
+	if (!apple_dma_map_context_supported(ad, dev))
+		return DMA_MAPPING_ERROR;
 
 	if (!ad || !ad->orig_dma_ops)
 		orig = apple_dma_orig_map_page(ad, dev, page, offset, size, dir,
@@ -1273,8 +1307,8 @@ static int apple_dma_map_sg(struct device *dev, struct scatterlist *sg,
 		return -EIO;
 	}
 
-	if (!apple_dma_usable(ad))
-		apple_dma_panic_state(dev, "map_sg in unusable context");
+	if (!apple_dma_map_context_supported(ad, dev))
+		return -EIO;
 
 	if (!ad->orig_dma_ops->map_sg)
 		return -EIO;
@@ -1464,7 +1498,9 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 		dev_info(dev, "apple_dma: unmap_sg #%u nents=%d\n",
 			 count, nents);
 
-	if (ad && ad->ready) {
+	if (!apple_dma_usable(ad))
+		apple_dma_panic_state(dev, "unmap_sg requested in unusable context");
+	{
 		spin_lock_irqsave(&ad->maps_lock, flags);
 		list_for_each_entry(candidate, &ad->sg_maps, node) {
 			if (candidate->sg == sg) {
@@ -1520,20 +1556,31 @@ static void apple_dma_unmap_sg(struct device *dev, struct scatterlist *sg,
 
 static int apple_dma_remap_alloc(struct apple_dma_dev *ad, struct device *dev,
 				 phys_addr_t phys, size_t size,
-				 dma_addr_t orig_dma, dma_addr_t *dma_handle)
+				 dma_addr_t orig_dma, dma_addr_t *dma_handle,
+				 bool coherent)
 {
 	dma_addr_t mapped_dma;
+	unsigned int order = 0;
 	int ret;
+
+	if (!size)
+		return -EINVAL;
+	if (coherent) {
+		order = get_order(size);
+		if (order >= sizeof(dma_addr_t) * 8 - PAGE_SHIFT)
+			return -ERANGE;
+	}
 
 	ret = apple_dma_map_one(ad, dev, phys, size, orig_dma, &mapped_dma);
 	if (ret)
 		return ret;
 
 	if (mapped_dma > dev->coherent_dma_mask ||
-	    size - 1 > dev->coherent_dma_mask - mapped_dma) {
+	    size - 1 > dev->coherent_dma_mask - mapped_dma ||
+	    (coherent && !IS_ALIGNED(mapped_dma, (dma_addr_t)PAGE_SIZE << order))) {
 		apple_dma_unmap_one(ad, dev, mapped_dma, size,
 				    APPLE_DMA_TRACE_OP_FREE);
-		dev_warn(dev, "apple_dma: mapped allocation exceeds coherent DMA mask\n");
+		dev_warn(dev, "apple_dma: mapped allocation violates DMA mask or alignment\n");
 		return -ERANGE;
 	}
 
@@ -1556,6 +1603,13 @@ static void *apple_dma_alloc(struct device *dev, size_t size,
 		dev_info(dev, "apple_dma: alloc #%u size=%zu\n",
 			 count, size);
 
+	if (!gfpflags_allow_blocking(gfp) ||
+	    !apple_dma_map_context_supported(ad, dev)) {
+		dev_warn_ratelimited(dev,
+			"apple_dma: cannot service nonblocking coherent allocation\n");
+		return NULL;
+	}
+
 	cpu_addr = apple_dma_orig_alloc_attrs(ad, dev, size, &orig_dma,
 					      gfp, attrs);
 	if (!cpu_addr)
@@ -1568,7 +1622,7 @@ static void *apple_dma_alloc(struct device *dev, size_t size,
 	}
 
 	phys = virt_to_phys(cpu_addr);
-	if (apple_dma_remap_alloc(ad, dev, phys, size, orig_dma, dma_handle)) {
+	if (apple_dma_remap_alloc(ad, dev, phys, size, orig_dma, dma_handle, true)) {
 		apple_dma_orig_free_attrs(ad, dev, size, cpu_addr, orig_dma, attrs);
 		return NULL;
 	}
@@ -1604,12 +1658,19 @@ static struct page *apple_dma_alloc_pages(struct device *dev, size_t size,
 		dev_info(dev, "apple_dma: alloc_pages #%u size=%zu\n",
 			 count, size);
 
+	if (!gfpflags_allow_blocking(gfp) ||
+	    !apple_dma_map_context_supported(ad, dev)) {
+		dev_warn_ratelimited(dev,
+			"apple_dma: cannot service nonblocking DMA allocation\n");
+		return NULL;
+	}
+
 	page = apple_dma_orig_alloc_pages(ad, dev, size, &orig_dma, dir, gfp);
 	if (!page)
 		return NULL;
 
 	phys = page_to_phys(page);
-	if (apple_dma_remap_alloc(ad, dev, phys, size, orig_dma, dma_handle)) {
+	if (apple_dma_remap_alloc(ad, dev, phys, size, orig_dma, dma_handle, false)) {
 		apple_dma_orig_free_pages(ad, dev, size, page, orig_dma, dir);
 		return NULL;
 	}
@@ -2018,6 +2079,9 @@ static int apple_dma_probe(struct pci_dev *pdev,
 
 	ad->managed_bdf = (u16)ioread32(ad->bar + REG_MANAGED_BDF);
 	ad->max_entries = ioread32(ad->bar + REG_MAX_ENTRIES);
+	ad->features = ioread32(ad->bar + REG_FEATURES);
+	dev_info(&pdev->dev, "apple_dma: protocol=%u features=%#x\n",
+		 version, ad->features);
 
 	if (!ad->max_entries) {
 		dev_err(&pdev->dev, "device reports max_entries=0\n");

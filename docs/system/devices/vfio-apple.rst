@@ -85,8 +85,10 @@ Platform constraints
 The macOS DART imposes limits that do not exist with Linux VFIO:
 
 - **No IOVA alignment guarantees**: the platform may return any address.
-  Guest drivers that assume page-aligned or naturally-aligned DMA
-  addresses must account for this.
+  The guest companion must reject mappings that do not meet the Linux DMA
+  API's alignment requirements; coherent allocations now reject misaligned
+  replacement handles. Streaming and GPU-page alignment still require
+  further work.
 - **Total DMA memory limit**: approximately 1.5 GB of guest memory can be
   registered for DMA at any time.
 - **Mapping count limit**: approximately 64k concurrent DMA mappings.
@@ -132,6 +134,27 @@ Exceeding them will cause map requests to fail.
      - DOORBELL
      - W
      - Any write triggers batch processing
+   * - 0x1C
+     - FEATURES
+     - R
+     - Optional protocol features; zero on older devices
+
+Version 3 optionally advertises ``APPLE_DMA_FEATURE_MAPPING_ID``. A guest
+that observes this bit can supply a monotonically increasing, nonzero 31-bit
+identifier in the map request flags; QEMU uses the corresponding opaque
+64-bit token for registration and unmap. IDs are not reused during the
+companion driver's lifetime. Exhaustion fails mapping rather than reusing an
+ID. Older guests continue to use GPA-based tokens, and newer guests fall back
+to GPA-based tokens when the feature is not advertised. The feature does not
+make the DMA interception, callback context or teardown paths safe by itself.
+
+The guest module currently fails new streaming mappings in atomic context and
+nonblocking DMA allocations. Unmapping in an atomic or otherwise unusable
+context is still fatal because the backend cannot safely defer host unmaps.
+Linux permits these calls, so this is a temporary safeguard, not DMA API
+conformance. Linux DMA dispatch can also bypass the hook, and its lifetime is
+not fully synchronized. Do not enable physical guest DMA until those issues
+are resolved and validated.
 
 Interrupts
 ----------

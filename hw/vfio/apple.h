@@ -52,6 +52,9 @@ typedef struct AppleVFIOState {
     EventNotifier irq_notifier;
     uint32_t num_irq_vectors;
     AppleVFIOBarMap bar_maps[PCI_ROM_SLOT];
+    bool rebar_scan_valid;
+    uint16_t physical_rebar_offset;
+    uint16_t physical_rebar_length;
 } AppleVFIOState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(VFIOApplePCIDevice, VFIO_APPLE_PCI)

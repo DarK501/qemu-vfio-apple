@@ -336,12 +336,16 @@ func launchVM(base: URL, opts: Options) throws {
         warn("A VFIO service match does not prove exclusive access; physical-device DMA is unsafe until guest DMA interception is fixed.")
     }
 
+    let logDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/qemu-vfio-apple", isDirectory: true)
+    let qemuLog = logDirectory.appendingPathComponent("qemu-\(UUID().uuidString).log")
     let qemuArgv = buildQemuArgv(opts: opts,
                                  bundle: bundle,
                                  overlay: overlay,
                                  varsFile: vars,
                                  extraDisks: extraDisks,
-                                 passthrough: passthrough)
+                                 passthrough: passthrough,
+                                 qemuLog: qemuLog)
 
     // If the user asked for --sudo, wrap the whole invocation in
     // `sudo -E -- <qemu> <args>`. -E preserves HOME so qemu's cocoa
@@ -358,6 +362,9 @@ func launchVM(base: URL, opts: Options) throws {
         argv = qemuArgv
     }
 
+    try FileManager.default.createDirectory(at: logDirectory,
+                                           withIntermediateDirectories: true,
+                                           attributes: [.posixPermissions: 0o700])
     if opts.dryRun {
         // Emit a copy-pasteable command line on stdout. Quote each arg
         // individually so spaces in paths survive; this matches what
@@ -369,6 +376,12 @@ func launchVM(base: URL, opts: Options) throws {
         }
         return
     }
+
+    guard FileManager.default.createFile(atPath: qemuLog.path, contents: nil,
+                                         attributes: [.posixPermissions: 0o600]) else {
+        throw LaunchError.qemuLaunchFailed("could not create log at \(qemuLog.path)")
+    }
+    log("QEMU guest-errors log: \(qemuLog.path)")
 
     if opts.runAsRoot {
         log("running \(bundle.qemuBinary.lastPathComponent) under sudo (may prompt for password)")
@@ -470,13 +483,15 @@ private func buildQemuArgv(opts: Options,
                            overlay: URL,
                            varsFile: URL,
                            extraDisks: [ResolvedDisk],
-                           passthrough: [PassthroughCandidate]) -> [String]
+                           passthrough: [PassthroughCandidate],
+                           qemuLog: URL) -> [String]
 {
     var a: [String] = []
 
     // Firmware data search path — we don't install qemu system-wide, so
     // without -L the binary can't find keymaps / descriptors / vgabios.
     a += ["-L", bundle.shareDir.path]
+    a += ["-D", qemuLog.path, "-d", "guest_errors"]
 
     // Machine + accelerator. The dext-based vfio-apple-pci path
     // handles guest DMA in-kernel via the apple-dma companion, so

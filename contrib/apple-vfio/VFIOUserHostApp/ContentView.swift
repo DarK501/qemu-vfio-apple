@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var cliStateForBundle: CliState = .missing
     @State private var statusMessage: String = ""
     @State private var statusTimer: Timer?
+    @State private var showDiagnostics = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -53,6 +54,9 @@ struct ContentView: View {
             startPolling()
         }
         .onDisappear { stopPolling() }
+        .sheet(isPresented: $showDiagnostics) {
+            DiagnosticsView()
+        }
     }
 
     private var header: some View {
@@ -89,6 +93,7 @@ struct ContentView: View {
                     .foregroundStyle(.green)
             }
 
+            Button("Diagnostics") { showDiagnostics = true }
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
         }

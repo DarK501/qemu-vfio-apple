@@ -2488,6 +2488,29 @@ static int vfio_setup_rebar_ecap(VFIOPCIDevice *vdev, uint16_t pos)
     ctrl = pci_get_long(pdev->config + pos + PCI_REBAR_CTRL);
     nbar = (ctrl & PCI_REBAR_CTRL_NBAR_MASK) >> PCI_REBAR_CTRL_NBAR_SHIFT;
 
+    /*
+     * Validate all entries before changing emulated configuration; failure
+     * hides the whole capability rather than publishing a partial one.
+     */
+    if (vdev->vbasedev.io_ops->validate_rebar) {
+        if (!nbar || nbar > PCI_ROM_SLOT ||
+            pos + PCI_REBAR_CAP + (unsigned int)nbar * 8 > vdev->config_size) {
+            return -EINVAL;
+        }
+        for (i = 0; i < nbar; i++) {
+            unsigned int bar, size;
+
+            ctrl = pci_get_long(pdev->config + pos + PCI_REBAR_CTRL + i * 8);
+            bar = ctrl & PCI_REBAR_CTRL_BAR_IDX;
+            size = (ctrl & PCI_REBAR_CTRL_BAR_SIZE) >>
+                   PCI_REBAR_CTRL_BAR_SHIFT;
+            if (!vdev->vbasedev.io_ops->validate_rebar(&vdev->vbasedev,
+                                                        bar, size)) {
+                return -EINVAL;
+            }
+        }
+    }
+
     for (i = 0; i < nbar; i++) {
         uint32_t cap;
         int size;

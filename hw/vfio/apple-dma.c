@@ -43,6 +43,7 @@
 #define APPLE_DMA_REG_CMD_GPA_LO    0x10    /* W:  command page GPA [31:0] */
 #define APPLE_DMA_REG_CMD_GPA_HI    0x14    /* W:  command page GPA [63:32] */
 #define APPLE_DMA_REG_DOORBELL      0x18    /* W:  any write triggers batch */
+#define APPLE_DMA_REG_FEATURES      0x1C    /* R:  optional extensions */
 #define APPLE_DMA_BAR_SIZE          0x1000  /* page-aligned */
 
 #define APPLE_DMA_VERSION           APPLE_DMA_PROTOCOL_VERSION
@@ -148,6 +149,7 @@ struct AppleDMAState {
 /* ------------------------------------------------------------------ */
 
 static uint32_t apple_dma_backend_map(AppleDMAState *s, uint64_t gpa,
+                                      uint64_t id,
                                       uint32_t size,
                                       AppleDMAMapResult *out_result)
 {
@@ -164,7 +166,7 @@ static uint32_t apple_dma_backend_map(AppleDMAState *s, uint64_t gpa,
         !apple_vfio_dext_dma_owner_attached(
             s->apple_host_bus, s->apple_host_device, s->apple_host_function,
             root, s->dext_conn) ||
-        g_hash_table_lookup(s->dma_mappings, &gpa)) {
+        g_hash_table_lookup(s->dma_mappings, &id)) {
         error_report("apple-dma: cannot map GPA 0x%" PRIx64
                      " without a live VFIO owner or over an existing map",
                      gpa);
@@ -193,21 +195,21 @@ static uint32_t apple_dma_backend_map(AppleDMAState *s, uint64_t gpa,
 
     /*
      * Keep the AddressSpace mapping alive until DriverKit completes DMA.
-     * GPA is only a mapping token here; the returned bus address is the
-     * address the physical device must use.
+     * The mapping ID is not a bus address; only the returned segments
+     * contain addresses the physical device may use.
      */
     kern_return_t kr = apple_host_backend()->register_dma(
-        s->dext_conn, gpa, (uint64_t)hva, size, &result, &registration);
+        s->dext_conn, id, (uint64_t)hva, size, &result, &registration);
     if (kr != KERN_SUCCESS) {
         if (registration != APPLE_DMA_REGISTRATION_NONE) {
-            mapping->id = gpa;
+            mapping->id = id;
             mapping->host_addr = hva;
             mapping->mapped_len = map_len;
             mapping->size = size;
             mapping->ownership_unknown =
                 registration == APPLE_DMA_REGISTRATION_UNKNOWN;
             g_hash_table_insert(s->dma_mappings, &mapping->id, mapping);
-            out_result->mapping_id = gpa;
+            out_result->mapping_id = id;
             error_report("apple-dma: registration failed for GPA 0x%" PRIx64
                          " (kr=0x%x, ownership %s); retaining guest backing",
                          gpa, kr, mapping->ownership_unknown ?
@@ -223,7 +225,7 @@ static uint32_t apple_dma_backend_map(AppleDMAState *s, uint64_t gpa,
         return APPLE_DMA_MAP_STATUS_ERROR;
     }
 
-    mapping->id = gpa;
+    mapping->id = id;
     mapping->host_addr = hva;
     mapping->mapped_len = map_len;
     mapping->size = size;
@@ -272,6 +274,21 @@ static uint32_t apple_dma_backend_unmap(AppleDMAState *s, uint64_t id,
 /* Doorbell — process a batch from the command page                    */
 /* ------------------------------------------------------------------ */
 
+static bool apple_dma_request_mapping_id(uint64_t gpa, uint32_t flags,
+                                         uint64_t *id)
+{
+    if (!flags) {
+        *id = gpa;
+        return true;
+    }
+    if (!(flags & APPLE_DMA_MAP_FLAG_MAPPING_ID) ||
+        !(flags & APPLE_DMA_MAP_ID_MASK)) {
+        return false;
+    }
+    *id = APPLE_DMA_MAP_ID_PREFIX | (flags & APPLE_DMA_MAP_ID_MASK);
+    return true;
+}
+
 static void apple_dma_handle_map(AppleDMAState *s, uint64_t req_gpa,
                                  uint64_t resp_gpa, uint32_t count)
 {
@@ -308,9 +325,18 @@ static void apple_dma_handle_map(AppleDMAState *s, uint64_t req_gpa,
     memset(resps, 0, count * sizeof(*resps));
     for (i = 0; i < count; i++) {
         uint64_t gpa = le64_to_cpu(reqs[i].gpa);
+        uint32_t flags = le32_to_cpu(reqs[i].flags);
+        uint64_t id;
         AppleDMAMapResult *resp = &resps[i];
-        uint32_t status = apple_dma_backend_map(
-            s, gpa, le32_to_cpu(reqs[i].len), resp);
+        uint32_t status;
+
+        if (!apple_dma_request_mapping_id(gpa, flags, &id)) {
+            resp->status = cpu_to_le32(APPLE_DMA_MAP_STATUS_ERROR);
+            ok = false;
+            continue;
+        }
+        status = apple_dma_backend_map(s, gpa, id,
+                                       le32_to_cpu(reqs[i].len), resp);
 
         if (status == APPLE_DMA_MAP_STATUS_OK) {
             resp->mapping_id = cpu_to_le64(resp->mapping_id);
@@ -456,6 +482,8 @@ static uint64_t apple_dma_bar_read(void *opaque, hwaddr addr, unsigned size)
         return s->max_entries;
     case APPLE_DMA_REG_STATUS:
         return s->last_status;
+    case APPLE_DMA_REG_FEATURES:
+        return APPLE_DMA_FEATURE_MAPPING_ID;
     default:
         return 0;
     }

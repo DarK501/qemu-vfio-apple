@@ -23,6 +23,12 @@
 #define APPLE_DMA_MAP_STATUS_ERROR 1
 #define APPLE_DMA_MAP_STATUS_RETAINED 2
 
+/* Optional version-3 extension, advertised at BAR0 offset 0x1c. */
+#define APPLE_DMA_FEATURE_MAPPING_ID 1U
+#define APPLE_DMA_MAP_FLAG_MAPPING_ID 0x80000000U
+#define APPLE_DMA_MAP_ID_MASK 0x7fffffffU
+#define APPLE_DMA_MAP_ID_PREFIX 0x8000000000000000ULL
+
 #ifdef __KERNEL__
 #include <linux/types.h>
 typedef __le64 apple_dma_le64_t;

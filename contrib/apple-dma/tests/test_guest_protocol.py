@@ -32,6 +32,7 @@ struct apple_dma_unmap_req { u64 iova, size; };
 struct apple_dma_unmap_resp { u64 iova; u32 status, reserved; };
 struct apple_dma_dev {
     struct pci_dev *pdev;
+    u32 features, next_mapping_id;
     struct apple_dma_map_req map_req;
     AppleDMAMapResult map_resp;
     struct apple_dma_unmap_req unmap_req;
@@ -43,6 +44,7 @@ static u64 unmap_reply_id;
 static u32 command;
 static int unmap_calls;
 static jmp_buf panic_env;
+#define dev_err(...) ((void)0)
 static void apple_dma_panic_state(struct device *dev, const char *reason)
 {
     (void)dev; (void)reason;
@@ -134,6 +136,34 @@ int main(void)
     prepare();
     unmap_reply_id = 0x1001;
     assert(apple_dma_device_unmap(&ad, 0x1000, 4096) == -EIO);
+
+    ad.features = APPLE_DMA_FEATURE_MAPPING_ID;
+    prepare();
+    reply.mapping_id = APPLE_DMA_MAP_ID_PREFIX | 1;
+    assert(map(&ad, &token, &dma, &len) == 0);
+    assert(token == reply.mapping_id &&
+           ad.map_req.flags == (APPLE_DMA_MAP_FLAG_MAPPING_ID | 1));
+    prepare();
+    reply.mapping_id = APPLE_DMA_MAP_ID_PREFIX | 2;
+    unmap_reply_id = reply.mapping_id;
+    reply.segments[1].address = 0xb000;
+    assert(map(&ad, &token, &dma, &len) == -ERANGE);
+    assert(unmap_calls == 1 && ad.unmap_req.iova == reply.mapping_id);
+    prepare();
+    reply.mapping_id = APPLE_DMA_MAP_ID_PREFIX | 3;
+    reply.status = APPLE_DMA_MAP_STATUS_RETAINED;
+    unmap_reply_id = reply.mapping_id;
+    assert(map(&ad, &token, &dma, &len) == -EIO && unmap_calls == 1);
+    prepare();
+    reply.mapping_id = 0x1000;
+    if (!setjmp(panic_env)) {
+        (void)map(&ad, &token, &dma, &len);
+        assert(!"wrong identity must not unmap another mapping");
+    }
+    assert(unmap_calls == 0);
+    ad.next_mapping_id = APPLE_DMA_MAP_ID_MASK;
+    prepare();
+    assert(map(&ad, &token, &dma, &len) == -ENOSPC && !unmap_calls);
     return 0;
 }
 """
