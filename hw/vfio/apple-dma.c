@@ -123,6 +123,12 @@ struct AppleDMAState {
 
     /* Configuration (set via properties) */
     uint32_t managed_bdf;
+    /*
+     * Optional: the managed device. When set, the BDF reported to the guest
+     * is computed live, because a device behind a bridge only gets its bus
+     * number once firmware has enumerated it.
+     */
+    PCIDevice *managed_dev;
     uint32_t max_entries;
     uint32_t apple_host_bus;
     uint32_t apple_host_device;
@@ -441,6 +447,10 @@ static uint64_t apple_dma_bar_read(void *opaque, hwaddr addr, unsigned size)
     case APPLE_DMA_REG_VERSION:
         return APPLE_DMA_VERSION;
     case APPLE_DMA_REG_MANAGED_BDF:
+        if (s->managed_dev) {
+            return PCI_BUILD_BDF(pci_dev_bus_num(s->managed_dev),
+                                 s->managed_dev->devfn);
+        }
         return s->managed_bdf;
     case APPLE_DMA_REG_MAX_ENTRIES:
         return s->max_entries;
@@ -621,6 +631,8 @@ static void apple_dma_pci_exit(PCIDevice *pdev)
 
 static const Property apple_dma_pci_properties[] = {
     DEFINE_PROP_UINT32("managed-bdf", AppleDMAState, managed_bdf, 0),
+    DEFINE_PROP_LINK("x-apple-managed-dev", AppleDMAState, managed_dev,
+                     TYPE_PCI_DEVICE, PCIDevice *),
     DEFINE_PROP_UINT32("max-entries", AppleDMAState, max_entries, 0),
     DEFINE_PROP_UINT32("x-apple-host-bus", AppleDMAState,
                        apple_host_bus, UINT32_MAX),

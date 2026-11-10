@@ -305,7 +305,9 @@ static bool apple_vfio_create_dma_companion(VFIOApplePCIDevice *adev,
     }
 
     dev = qdev_new("apple-dma-pci");
-    if (!object_property_set_uint(OBJECT(dev), "managed-bdf",
+    if (!object_property_set_link(OBJECT(dev), "x-apple-managed-dev",
+                                  OBJECT(pdev), errp) ||
+        !object_property_set_uint(OBJECT(dev), "managed-bdf",
                                   PCI_BUILD_BDF(pci_dev_bus_num(pdev),
                                                 pdev->devfn), errp) ||
         !object_property_set_uint(OBJECT(dev), "x-apple-host-bus",
@@ -325,7 +327,11 @@ static bool apple_vfio_create_dma_companion(VFIOApplePCIDevice *adev,
         return false;
     }
 
-    if (!qdev_realize(dev, BUS(pci_get_bus(pdev)), errp)) {
+    /*
+     * Place the companion on the root bus: a bridge's secondary bus (for
+     * example a pcie-root-port) has a single slot, which the GPU occupies.
+     */
+    if (!qdev_realize(dev, BUS(pci_device_root_bus(pdev)), errp)) {
         object_unref(OBJECT(dev));
         return false;
     }
