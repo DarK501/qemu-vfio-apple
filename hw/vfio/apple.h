@@ -78,6 +78,7 @@ struct VFIOApplePCIDevice {
     bool dma_companion_autocreated;
     bool use_dma_companion;
     uint64_t dma_bounce_size;
+    uint64_t dma_bounce_alignment;
     VFIOAppleBounceBuffer *bounce;
     /*
      * Optional `host-root=` property: the registry-entry name of the

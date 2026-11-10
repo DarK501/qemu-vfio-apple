@@ -1269,6 +1269,7 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
     PCIDevice *pdev = PCI_DEVICE(vdev);
     io_connect_t conn = apple_vfio_connection(vbasedev);
     uint64_t size = adev->dma_bounce_size;
+    uint64_t alignment = adev->dma_bounce_alignment;
     uint64_t bus_addr = 0, bus_len = 0;
     mach_vm_address_t map_addr = 0;
     mach_vm_size_t map_size = 0;
@@ -1277,6 +1278,12 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
 
     if (size == 0) {
         return true;
+    }
+
+    if (alignment < 4096 || (alignment & (alignment - 1)) != 0) {
+        error_setg(errp, "vfio-apple: dma-bounce-alignment must be a "
+                   "power of two of at least 4096 bytes");
+        return false;
     }
 
     if (conn == IO_OBJECT_NULL) {
@@ -1293,10 +1300,19 @@ static bool apple_vfio_setup_bounce_buffer(VFIOApplePCIDevice *adev,
      * so we can back a guest MemoryRegion with it.
      */
     kr = apple_host_backend()->client->allocate_dma_buffer(
-        conn, size, 0, &bus_addr, &bus_len, &map_addr, &map_size);
+        conn, size, alignment, &bus_addr, &bus_len, &map_addr, &map_size);
     if (kr != KERN_SUCCESS) {
         error_setg(errp, "vfio-apple: AllocateDMABuffer failed "
-                   "(size=%" PRIu64 " kr=0x%x)", size, kr);
+                   "(size=%" PRIu64 " alignment=%" PRIu64 " kr=0x%x)",
+                   size, alignment, kr);
+        return false;
+    }
+
+    if ((bus_addr & (alignment - 1)) != 0) {
+        error_setg(errp, "vfio-apple: DMA buffer address 0x%" PRIx64
+                   " does not satisfy requested alignment %" PRIu64,
+                   bus_addr, alignment);
+        apple_vfio_free_bounce_buffer(conn, map_addr);
         return false;
     }
 
@@ -1455,6 +1471,8 @@ static const Property apple_vfio_pci_properties[] = {
                      use_dma_companion, false),
     DEFINE_PROP_SIZE("dma-bounce-size", VFIOApplePCIDevice,
                      dma_bounce_size, 64 * MiB),
+    DEFINE_PROP_SIZE("dma-bounce-alignment", VFIOApplePCIDevice,
+                     dma_bounce_alignment, 4096),
     /*
      * `host-root=` disambiguates which VFIOUserPCIDriver instance to
      * bind to when the BDF given via `host=` is claimed by more than

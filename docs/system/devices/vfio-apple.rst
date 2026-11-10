@@ -91,6 +91,11 @@ The existing ``dma-bounce-size`` path is an experimental host-allocated pool,
 not a validated stock-Linux DMA path. Its restricted-pool device-tree wiring
 is specific to the ARM ``virt`` machine; it does not attach a pool to a PCI
 device on an x86 ACPI guest. The app currently enables the companion instead.
+The experimental allocator accepts ``dma-bounce-alignment`` (a power of two,
+at least 4096 bytes; default 4096) to request a suitably aligned DMA address.
+For example, ``dma-bounce-alignment=128M`` requests the 128 MiB alignment that
+Linux x86 memory hotplug reported as necessary in the probe below. This
+property does not add x86 ACPI memory-device or DMA-pool attachment support.
 Neither path provides a proven physical bus-master readiness or device-DMA
 drain gate. Do not enable physical guest DMA to evaluate this experiment.
 In Linux v7.0, ``acpi_arch_dma_setup()`` is an empty inline function on x86;
