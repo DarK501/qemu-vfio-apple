@@ -957,26 +957,44 @@ static void apple_dma_free_all(struct apple_dma_dev *ad)
 
 
 /*
- * Look up the original DMA address for a device-mapped address.
- * Used by sync ops to pass through to the original DMA subsystem.
- * Returns mapped_dma unchanged if no tracking entry is found.
+ * Find an unambiguous original address for an entire mapped sync range.
  */
-static dma_addr_t apple_dma_orig_addr(struct apple_dma_dev *ad,
-				      dma_addr_t mapped_dma)
+static bool apple_dma_orig_addr(struct apple_dma_dev *ad,
+				dma_addr_t mapped_dma, size_t size,
+				dma_addr_t *out_orig)
 {
 	struct apple_dma_map_entry *e;
-	dma_addr_t orig = mapped_dma;
+	dma_addr_t orig = 0;
+	bool found = false;
 	unsigned long flags;
+
+	if (!size)
+		return false;
 
 	spin_lock_irqsave(&ad->maps_lock, flags);
 	list_for_each_entry(e, &ad->maps, node) {
-		if (e->mapped_dma == mapped_dma) {
-			orig = e->orig_dma;
+		dma_addr_t offset, candidate;
+
+		if (mapped_dma < e->mapped_dma)
+			continue;
+		offset = mapped_dma - e->mapped_dma;
+		if (offset >= e->size || size > e->size - offset ||
+		    offset > (dma_addr_t)~0 - e->orig_dma)
+			continue;
+		candidate = e->orig_dma + offset;
+		if (size - 1 > (dma_addr_t)~0 - candidate)
+			continue;
+		if (found && orig != candidate) {
+			found = false;
 			break;
 		}
+		orig = candidate;
+		found = true;
 	}
 	spin_unlock_irqrestore(&ad->maps_lock, flags);
-	return orig;
+	if (found)
+		*out_orig = orig;
+	return found;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1729,11 +1747,16 @@ typedef void (*apple_dma_sync_sg_fn_t)(struct device *dev,
 				       enum dma_data_direction dir);
 
 static dma_addr_t apple_dma_translate_dma_handle(struct apple_dma_dev *ad,
-						 dma_addr_t dma_handle)
+						 struct device *dev,
+						 dma_addr_t dma_handle,
+						 size_t size)
 {
-	if (ad && ad->ready)
-		return apple_dma_orig_addr(ad, dma_handle);
-	return dma_handle;
+	dma_addr_t orig;
+
+	if (!ad || !ad->ready ||
+	    !apple_dma_orig_addr(ad, dma_handle, size, &orig))
+		apple_dma_panic_state(dev, "DMA sync range has no unambiguous mapping");
+	return orig;
 }
 
 static void apple_dma_sync_single_common(struct apple_dma_dev *ad,
@@ -1745,7 +1768,8 @@ static void apple_dma_sync_single_common(struct apple_dma_dev *ad,
 	if (!sync_fn)
 		return;
 
-	sync_fn(dev, apple_dma_translate_dma_handle(ad, dma_handle), size, dir);
+	sync_fn(dev, apple_dma_translate_dma_handle(ad, dev, dma_handle, size),
+		size, dir);
 }
 
 static void apple_dma_sync_sg_common(struct apple_dma_dev *ad,
@@ -1794,7 +1818,8 @@ static void apple_dma_sync_sg_common(struct apple_dma_dev *ad,
 
 	for_each_sg(sg, s, nents, i) {
 		sync_fn(dev,
-			apple_dma_translate_dma_handle(ad, sg_dma_address(s)),
+			apple_dma_translate_dma_handle(ad, dev, sg_dma_address(s),
+						       sg_dma_len(s)),
 			sg_dma_len(s), dir);
 	}
 }

@@ -149,6 +149,10 @@ ID. Older guests continue to use GPA-based tokens, and newer guests fall back
 to GPA-based tokens when the feature is not advertised. The feature does not
 make the DMA interception, callback context or teardown paths safe by itself.
 
+Guest sync callbacks translate subranges back to the original guest DMA
+mapping and fail fatally if the range has no unambiguous owner. This does not
+establish host-side DMA coherency or ordering.
+
 The guest module currently fails new streaming mappings in atomic context and
 nonblocking DMA allocations. Unmapping in an atomic or otherwise unusable
 context is still fatal because the backend cannot safely defer host unmaps.
