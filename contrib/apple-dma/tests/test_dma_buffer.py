@@ -76,7 +76,7 @@ int main()
 def main():
     source = SOURCE.read_text()
     start = source.index("static kern_return_t\nvfio_user_release_dma_buffer(")
-    end = source.index("\nstatic kern_return_t\nvfio_user_allocate_dma_buffer(",
+    end = source.index("\nstatic kern_return_t\nvfio_user_validate_dma_buffer_segments(",
                        start)
     with tempfile.TemporaryDirectory() as directory:
         test = pathlib.Path(directory) / "dma_buffer.cpp"

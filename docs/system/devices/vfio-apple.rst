@@ -111,11 +111,13 @@ these probes. Relevant Linux v7.0 sources are
 and `direct DMA allocation <https://github.com/torvalds/linux/blob/v7.0/kernel/dma/direct.c>`_.
 
 The dext's current buffer allocation requires a PCI claim, and the claim
-enables bus mastering. Clearing the enable bit later is not proof that
-outstanding transactions have drained. A host allocation experiment therefore
-requires a separately established device-quiescence and mapping-lifetime
-protocol before it can safely be run on a physical device; the synthetic
-probes below do not provide one.
+enables bus mastering. Successful allocations log the returned flags and
+every segment's address, length and offset, grouped by sample ID in the dext
+logs; these addresses may be sensitive. The first segment alone is not proof
+that a multi-segment mapping is contiguous. Clearing the enable bit later is
+not proof that outstanding transactions have drained. A host allocation
+experiment therefore requires a separately established device-quiescence and
+mapping-lifetime protocol; the synthetic probes below do not provide one.
 
 To investigate guest RAM visibility without a physical device, boot a
 **separate disposable** stock x86 Linux VM without any Apple VFIO device or

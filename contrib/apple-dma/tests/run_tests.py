@@ -16,6 +16,7 @@ TESTS = (
     "test_driver_stop.py",
     "test_interrupt_stop.py",
     "test_dma_buffer.py",
+    "test_dma_buffer_segments.py",
     "test_bounce_client.py",
     "test_bar_cache.py",
     "test_config_filter.py",

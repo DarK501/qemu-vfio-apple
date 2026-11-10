@@ -696,6 +696,36 @@ vfio_user_release_dma_buffer(VFIOUserPCIDriverUserClient *client)
 }
 
 static kern_return_t
+vfio_user_validate_dma_buffer_segments(const IOAddressSegment *segments,
+                                       uint32_t count, uint32_t capacity,
+                                       uint64_t size)
+{
+    uint64_t covered = 0;
+
+    if (segments == nullptr || count == 0 || count > capacity || size == 0) {
+        return kIOReturnBadArgument;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t length = segments[i].length;
+
+        if (length == 0 || length > size - covered ||
+            length - 1 > UINT64_MAX - segments[i].address) {
+            return kIOReturnBadArgument;
+        }
+        uint64_t end = segments[i].address + length - 1;
+        for (uint32_t j = 0; j < i; j++) {
+            uint64_t previousEnd = segments[j].address + segments[j].length - 1;
+            if (segments[i].address <= previousEnd &&
+                segments[j].address <= end) {
+                return kIOReturnBadArgument;
+            }
+        }
+        covered += length;
+    }
+    return covered == size ? kIOReturnSuccess : kIOReturnBadArgument;
+}
+
+static kern_return_t
 vfio_user_allocate_dma_buffer(VFIOUserPCIDriverUserClient *client,
                               uint64_t requestedSize,
                               uint64_t requestedAlignment)
@@ -789,6 +819,17 @@ vfio_user_allocate_dma_buffer(VFIOUserPCIDriverUserClient *client,
         return ret == kIOReturnSuccess ? kIOReturnUnsupported : ret;
     }
 
+    ret = vfio_user_validate_dma_buffer_segments(
+        client->ivars->dmaSegments, dmaSegmentsCount,
+        sizeof(client->ivars->dmaSegments) / sizeof(client->ivars->dmaSegments[0]),
+        requestedSize);
+    if (ret != kIOReturnSuccess) {
+        vfio_user_dma_log("DMA buffer has invalid segment coverage: count=%u size=%llu",
+                          (unsigned int)dmaSegmentsCount, requestedSize);
+        kern_return_t cleanupRet = vfio_user_release_dma_buffer(client);
+        return cleanupRet == kIOReturnSuccess ? ret : cleanupRet;
+    }
+
     VFIOUserPCIDeviceIdentity identity;
     if (vfio_user_read_identity(driverService, &identity) == kIOReturnSuccess) {
         os_log(OS_LOG_DEFAULT,
@@ -801,6 +842,19 @@ vfio_user_allocate_dma_buffer(VFIOUserPCIDriverUserClient *client,
                (unsigned int)identity.bus,
                (unsigned int)identity.device,
                (unsigned int)identity.function);
+    }
+    static uint64_t nextSampleID = 0;
+    uint64_t sampleID = __atomic_add_fetch(&nextSampleID, 1, __ATOMIC_RELAXED);
+    uint64_t offset = 0;
+    vfio_user_dma_log("DMA buffer details sample=%llu size=%llu flags=%#llx segments=%u",
+                      sampleID, requestedSize, dmaFlags,
+                      (unsigned int)dmaSegmentsCount);
+    for (uint32_t i = 0; i < dmaSegmentsCount; i++) {
+        vfio_user_dma_log("DMA buffer segment sample=%llu index=%u offset=%llu address=%#llx length=%llu",
+                          sampleID, (unsigned int)i, offset,
+                          client->ivars->dmaSegments[i].address,
+                          client->ivars->dmaSegments[i].length);
+        offset += client->ivars->dmaSegments[i].length;
     }
 
     return kIOReturnSuccess;
