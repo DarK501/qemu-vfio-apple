@@ -301,6 +301,14 @@ this paused baseline also omits its disks and peripheral devices, so a pass
 alone does not isolate the cause. Use ``--device pc-dimm`` for a comparison.
 The trace can include host virtual addresses; review it before sharing.
 
+To compare the same paused HVF/NVDIMM setup with a live DriverKit allocation,
+replace ``--address`` with ``--bdf 44:00.0 --confirm-claim``. The script reads
+the current allocation address from QMP rather than assuming it is stable.
+This claims the host PCI device and enables bus mastering: run only while the
+device is idle and not claimed elsewhere. HVF may abort again; an abort can
+bypass QEMU cleanup and does not prove outstanding device DMA has drained.
+This comparison does not boot the guest or validate Linux or physical DMA.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It
