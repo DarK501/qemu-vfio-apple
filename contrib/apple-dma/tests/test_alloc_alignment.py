@@ -21,11 +21,20 @@ typedef uint64_t u64;
 #define PAGE_SIZE 4096UL
 #define IS_ALIGNED(x, a) (((x) & ((a) - 1)) == 0)
 #define APPLE_DMA_TRACE_OP_FREE 1
-#define dev_warn(...) ((void)0)
 struct device { uint64_t coherent_dma_mask; };
 struct apple_dma_dev { int unused; };
 static dma_addr_t result;
-static int maps, unmaps, map_error;
+static int maps, unmaps, map_error, warnings;
+static unsigned long long seen_alignment;
+static void dev_warn(struct device *dev, const char *fmt, dma_addr_t *dma,
+                     size_t size, unsigned long long mask,
+                     unsigned long long alignment)
+{
+    (void)fmt; (void)size;
+    assert(*dma == result && mask == dev->coherent_dma_mask);
+    warnings++;
+    seen_alignment = alignment;
+}
 static u64 seen_mask;
 static unsigned int get_order(size_t size)
 {
@@ -65,12 +74,12 @@ int main(void)
     assert(out == result && maps == 1 && unmaps == 0 && seen_mask == 0xffff);
     result = 0x3000;
     assert(apple_dma_remap_alloc(&ad, &dev, 0, 5000, 0, &out, true) == -ERANGE);
-    assert(unmaps == 1);
+    assert(unmaps == 1 && warnings == 1 && seen_alignment == 8192);
     assert(!apple_dma_remap_alloc(&ad, &dev, 0, 5000, 0, &out, false));
     assert(seen_mask == dev.coherent_dma_mask);
     result = 0xf000;
     assert(apple_dma_remap_alloc(&ad, &dev, 0, 8192, 0, &out, true) == -ERANGE);
-    assert(unmaps == 2);
+    assert(unmaps == 2 && warnings == 2 && seen_alignment == 8192);
     result = 0x1000;
     assert(apple_dma_remap_alloc(&ad, &dev, 0, 1, 0, &out, true) == 0);
     assert(apple_dma_remap_alloc(&ad, &dev, 0, 0, 0, &out, true) == -EINVAL);

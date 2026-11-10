@@ -167,6 +167,11 @@ Guest sync callbacks translate subranges back to the original guest DMA
 mapping and fail fatally if the range has no unambiguous owner. This does not
 establish host-side DMA coherency or ordering.
 
+When a coherent allocation's replacement DMA handle violates its mask or
+allocation-order alignment, the guest kernel log reports the address, size,
+mask and required alignment before rolling the mapping back. The app's
+diagnostic export includes the guest kernel log when SSH collection succeeds.
+
 If reported host DMA segments overlap a live window in device address space,
 the guest stops with a fatal error instead of unregistering an overlapping
 window whose effect on the other mapping is unknown. Failed or malformed

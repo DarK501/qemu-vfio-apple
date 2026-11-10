@@ -1683,6 +1683,7 @@ static int apple_dma_remap_alloc(struct apple_dma_dev *ad, struct device *dev,
 				 bool coherent)
 {
 	dma_addr_t mapped_dma;
+	dma_addr_t alignment = 1;
 	unsigned int order = 0;
 	int ret;
 
@@ -1692,6 +1693,7 @@ static int apple_dma_remap_alloc(struct apple_dma_dev *ad, struct device *dev,
 		order = get_order(size);
 		if (order >= sizeof(dma_addr_t) * 8 - PAGE_SHIFT)
 			return -ERANGE;
+		alignment = (dma_addr_t)PAGE_SIZE << order;
 	}
 
 	ret = apple_dma_map_one(ad, dev, phys, size, orig_dma,
@@ -1701,10 +1703,13 @@ static int apple_dma_remap_alloc(struct apple_dma_dev *ad, struct device *dev,
 
 	if (mapped_dma > dev->coherent_dma_mask ||
 	    size - 1 > dev->coherent_dma_mask - mapped_dma ||
-	    (coherent && !IS_ALIGNED(mapped_dma, (dma_addr_t)PAGE_SIZE << order))) {
+	    !IS_ALIGNED(mapped_dma, alignment)) {
+		dev_warn(dev, "apple_dma: mapped allocation violates DMA constraints: dma=%pad size=%zu mask=%#llx required_alignment=%llu\n",
+			 &mapped_dma, size,
+			 (unsigned long long)dev->coherent_dma_mask,
+			 (unsigned long long)alignment);
 		apple_dma_unmap_one(ad, dev, mapped_dma, size,
 				    APPLE_DMA_TRACE_OP_FREE);
-		dev_warn(dev, "apple_dma: mapped allocation violates DMA mask or alignment\n");
 		return -ERANGE;
 	}
 
