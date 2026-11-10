@@ -23,35 +23,60 @@ typedef int io_connect_t;
 typedef int kern_return_t;
 typedef uintptr_t mach_vm_address_t;
 typedef size_t mach_vm_size_t;
-enum { KERN_SUCCESS = 0, kIOMapAnywhere = 0 };
+typedef int vm_prot_t;
+enum { KERN_SUCCESS = 0, kIOMapAnywhere = 0, VM_FLAGS_ANYWHERE = 1,
+       VM_PROT_READ = 1, VM_PROT_WRITE = 2, VM_INHERIT_NONE = 2 };
 static void *addresses[2];
-static size_t lengths[2];
-static int map_count, unmap_count, fail_map = -1, fail_unmap = -1;
+static size_t map_size;
+static int map_count, remap_count, unmap_count, dealloc_count;
+static int fail_map, fail_remap, fail_unmap, fail_dealloc, protection;
 static int mach_task_self(void) { return 7; }
 static int IOConnectMapMemory64(int conn, int type, int task, uintptr_t *addr,
                                  size_t *size, int flags)
 {
     assert(conn == 1 && type == 0 && task == 7 && flags == 0);
-    int index = map_count++;
-    if (index == fail_map) { return 9; }
-    *addr = (uintptr_t)addresses[index];
-    *size = lengths[index];
+    map_count++;
+    if (fail_map) { return 9; }
+    *addr = (uintptr_t)addresses[0];
+    *size = map_size;
     return 0;
+}
+static int mach_vm_remap(int target, uintptr_t *addr, size_t size,
+                         uintptr_t mask, int flags, int source,
+                         uintptr_t srcaddr, int copy, int *current,
+                         int *maximum, int inherit)
+{
+    assert(target == 7 && source == 7 && size == 4096 && mask == 0 &&
+           flags == VM_FLAGS_ANYWHERE && srcaddr == (uintptr_t)addresses[0] &&
+           !copy && inherit == VM_INHERIT_NONE);
+    remap_count++;
+    if (fail_remap) { return 9; }
+    *addr = (uintptr_t)addresses[1];
+    *current = *maximum = protection;
+    return 0;
+}
+static int mach_vm_deallocate(int task, uintptr_t addr, size_t size)
+{
+    assert(task == 7 && addr == (uintptr_t)addresses[1] && size == 4096);
+    dealloc_count++;
+    return fail_dealloc ? 10 : 0;
 }
 static int IOConnectUnmapMemory64(int conn, int type, int task, uintptr_t addr)
 {
     assert(conn == 1 && type == 0 && task == 7);
-    assert(addr == (uintptr_t)addresses[unmap_count]);
-    return unmap_count++ == fail_unmap ? 10 : 0;
+    assert(addr == (uintptr_t)addresses[0]);
+    unmap_count++;
+    return fail_unmap ? 10 : 0;
 }
 """
 
 SUFFIX = r"""
 static void reset(void)
 {
-    map_count = unmap_count = 0;
-    fail_map = fail_unmap = -1;
-    lengths[0] = lengths[1] = 4096;
+    map_count = remap_count = unmap_count = dealloc_count = 0;
+    fail_map = fail_remap = fail_unmap = fail_dealloc = 0;
+    protection = VM_PROT_READ | VM_PROT_WRITE;
+    map_size = 4096;
 }
 int main(void)
 {
@@ -77,32 +102,44 @@ int main(void)
     assert(((uint8_t *)second)[0] == 0x37 &&
            ((uint8_t *)second)[2048] == 0x58 &&
            ((uint8_t *)second)[4095] == 0x7a);
-    assert(unmap_cpu_alias(1, mappings) && unmap_count == 2);
+    assert(unmap_cpu_alias(1, mappings) && unmap_count == 1 &&
+           dealloc_count == 1);
     reset();
     mappings[0] = (DMACpuMapping){0}; mappings[1] = (DMACpuMapping){0};
     fail_map = 1;
     assert(!probe_cpu_alias(1, 4096, mappings));
-    assert(mappings[0].mapped && !mappings[1].mapped);
-    assert(unmap_cpu_alias(1, mappings) && unmap_count == 1);
+    assert(!mappings[0].mapped && !mappings[1].mapped);
+    assert(unmap_cpu_alias(1, mappings) && !unmap_count && !dealloc_count);
     reset();
     mappings[0] = (DMACpuMapping){0}; mappings[1] = (DMACpuMapping){0};
-    lengths[0] = 2048;
+    fail_remap = 1;
     assert(!probe_cpu_alias(1, 4096, mappings));
     assert(mappings[0].mapped && !mappings[1].mapped);
     assert(unmap_cpu_alias(1, mappings) && unmap_count == 1);
     reset();
     mappings[0] = (DMACpuMapping){0}; mappings[1] = (DMACpuMapping){0};
-    addresses[1] = first;
+    map_size = 2048;
     assert(!probe_cpu_alias(1, 4096, mappings));
+    assert(mappings[0].mapped && !mappings[1].mapped);
     assert(unmap_cpu_alias(1, mappings) && unmap_count == 1);
+    reset();
+    mappings[0] = (DMACpuMapping){0}; mappings[1] = (DMACpuMapping){0};
+    protection = VM_PROT_READ;
+    assert(!probe_cpu_alias(1, 4096, mappings));
+    assert(unmap_cpu_alias(1, mappings) && unmap_count == 1 &&
+           dealloc_count == 1);
     reset();
     mappings[0] = (DMACpuMapping){0}; mappings[1] = (DMACpuMapping){0};
     addresses[1] = different;
     assert(!probe_cpu_alias(1, 4096, mappings));
     assert(((uint8_t *)first)[0] == 0x37);
-    fail_unmap = 0;
+    fail_dealloc = 1;
     assert(!unmap_cpu_alias(1, mappings));
-    assert(mappings[0].mapped && !mappings[1].mapped && unmap_count == 2);
+    assert(mappings[0].mapped && mappings[1].mapped && unmap_count == 0);
+    fail_dealloc = 0;
+    fail_unmap = 1;
+    assert(!unmap_cpu_alias(1, mappings));
+    assert(mappings[0].mapped && !mappings[1].mapped && unmap_count == 1);
     assert(munmap(first, 4096) == 0 && munmap(second, 4096) == 0 &&
            munmap(different, 4096) == 0);
     assert(fclose(f) == 0 && fclose(other) == 0);

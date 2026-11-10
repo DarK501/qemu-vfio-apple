@@ -7,6 +7,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,25 +26,43 @@ typedef struct DMACpuMapping {
 static bool probe_cpu_alias(io_connect_t conn, uint64_t size,
                             DMACpuMapping mappings[2])
 {
-    for (unsigned int i = 0; i < 2; i++) {
-        kern_return_t kr = IOConnectMapMemory64(conn, 0, mach_task_self(),
-                                                &mappings[i].address,
-                                                &mappings[i].size,
-                                                kIOMapAnywhere);
-        printf("CPU map %u: kr=%#x address=%#llx size=%#llx\n", i, kr,
-               (unsigned long long)mappings[i].address,
-               (unsigned long long)mappings[i].size);
-        if (kr != KERN_SUCCESS) {
-            return false;
-        }
-        mappings[i].mapped = true;
-        if (mappings[i].address == 0 || mappings[i].size < size ||
-            mappings[i].address > UINTPTR_MAX ||
-            size - 1 > UINTPTR_MAX - mappings[i].address) {
-            fprintf(stderr, "CPU map %u does not cover the requested buffer\n",
-                    i);
-            return false;
-        }
+    vm_prot_t current = 0, maximum = 0;
+    kern_return_t kr;
+
+    kr = IOConnectMapMemory64(conn, 0, mach_task_self(),
+                              &mappings[0].address, &mappings[0].size,
+                              kIOMapAnywhere);
+    printf("IOKit map: kr=%#x address=%#llx size=%#llx\n", kr,
+           (unsigned long long)mappings[0].address,
+           (unsigned long long)mappings[0].size);
+    if (kr != KERN_SUCCESS) {
+        return false;
+    }
+    mappings[0].mapped = true;
+    if (mappings[0].address == 0 || mappings[0].size < size ||
+        mappings[0].address > UINTPTR_MAX ||
+        size - 1 > UINTPTR_MAX - mappings[0].address) {
+        fprintf(stderr, "IOKit map does not cover the requested buffer\n");
+        return false;
+    }
+
+    kr = mach_vm_remap(mach_task_self(), &mappings[1].address, size, 0,
+                       VM_FLAGS_ANYWHERE, mach_task_self(), mappings[0].address,
+                       false, &current, &maximum, VM_INHERIT_NONE);
+    printf("Mach shared remap: kr=%#x address=%#llx protections=%#x/%#x\n",
+           kr, (unsigned long long)mappings[1].address,
+           (unsigned int)current, (unsigned int)maximum);
+    if (kr != KERN_SUCCESS) {
+        return false;
+    }
+    mappings[1].size = size;
+    mappings[1].mapped = true;
+    if (mappings[1].address == 0 || mappings[1].address > UINTPTR_MAX ||
+        size - 1 > UINTPTR_MAX - mappings[1].address ||
+        (current & (VM_PROT_READ | VM_PROT_WRITE)) !=
+        (VM_PROT_READ | VM_PROT_WRITE)) {
+        fprintf(stderr, "Mach alias lacks required address range or permissions\n");
+        return false;
     }
 
     uint64_t first = mappings[0].address, second = mappings[1].address;
@@ -83,29 +102,27 @@ static bool probe_cpu_alias(io_connect_t conn, uint64_t size,
 
 static bool unmap_cpu_alias(io_connect_t conn, DMACpuMapping mappings[2])
 {
-    bool ok = true;
-    for (unsigned int i = 0; i < 2; i++) {
-        if (mappings[i].mapped) {
-            if (i == 1 && mappings[0].address == mappings[1].address &&
-                !mappings[0].mapped) {
-                mappings[i].mapped = false;
-                printf("CPU map %u reused map 0; no second unmap\n", i);
-                continue;
-            }
-            if (i == 1 && mappings[0].address == mappings[1].address) {
-                continue;
-            }
-            kern_return_t kr = IOConnectUnmapMemory64(conn, 0, mach_task_self(),
-                                                       mappings[i].address);
-            printf("CPU unmap %u: %#x\n", i, kr);
-            if (kr != KERN_SUCCESS) {
-                ok = false;
-            } else {
-                mappings[i].mapped = false;
-            }
+    kern_return_t kr;
+
+    if (mappings[1].mapped) {
+        kr = mach_vm_deallocate(mach_task_self(), mappings[1].address,
+                                mappings[1].size);
+        printf("Mach alias deallocate: %#x\n", kr);
+        if (kr != KERN_SUCCESS) {
+            return false;
         }
+        mappings[1].mapped = false;
     }
-    return ok;
+    if (mappings[0].mapped) {
+        kr = IOConnectUnmapMemory64(conn, 0, mach_task_self(),
+                                    mappings[0].address);
+        printf("IOKit unmap: %#x\n", kr);
+        if (kr != KERN_SUCCESS) {
+            return false;
+        }
+        mappings[0].mapped = false;
+    }
+    return true;
 }
 
 static int parse_device(const char *bdf, const char *id,
