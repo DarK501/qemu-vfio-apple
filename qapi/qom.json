@@ -781,6 +781,27 @@
   'if': 'CONFIG_LINUX' }
 
 ##
+# @MemoryBackendAppleDmaProperties:
+#
+# Properties for memory-backend-apple-dma objects, which map a
+# DriverKit DMA allocation as guest RAM.
+#
+# @bdf: PCI address of the device to claim, as BB:DD.F
+#
+# @host-root: optional host dext service root
+#
+# @alignment: required DMA address alignment in bytes
+#
+# Since: 11.0
+##
+{ 'struct': 'MemoryBackendAppleDmaProperties',
+  'base': 'MemoryBackendProperties',
+  'data': { 'bdf': 'str',
+            '*host-root': 'str',
+            '*alignment': 'size' },
+  'if': 'CONFIG_DARWIN' }
+
+##
 # @MemoryBackendShmProperties:
 #
 # Properties for memory-backend-shm objects.
@@ -1290,6 +1311,8 @@
     'main-loop',
     { 'name': 'memory-backend-epc',
       'if': 'CONFIG_LINUX' },
+    { 'name': 'memory-backend-apple-dma',
+      'if': 'CONFIG_DARWIN' },
     'memory-backend-file',
     { 'name': 'memory-backend-memfd',
       'if': 'CONFIG_LINUX' },
@@ -1370,6 +1393,8 @@
       'main-loop':                  'MainLoopProperties',
       'memory-backend-epc':         { 'type': 'MemoryBackendEpcProperties',
                                       'if': 'CONFIG_LINUX' },
+      'memory-backend-apple-dma':   { 'type': 'MemoryBackendAppleDmaProperties',
+                                      'if': 'CONFIG_DARWIN' },
       'memory-backend-file':        'MemoryBackendFileProperties',
       'memory-backend-memfd':       { 'type': 'MemoryBackendMemfdProperties',
                                       'if': 'CONFIG_LINUX' },
