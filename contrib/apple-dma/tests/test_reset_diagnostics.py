@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise reset dispatch and the DriverKit fallback policy."""
+"""Exercise reset dispatch and the DriverKit function-reset policy."""
 
 import pathlib
 import subprocess
@@ -20,9 +20,8 @@ enum { KERN_SUCCESS = 0, IO_OBJECT_NULL = 0,
        kIOReturnNotOpen = 2, kIOReturnNotAttached = 3,
        kIOReturnUnsupported = 4,
        kIOPCIDeviceResetTypeFunctionReset = 10,
-       kIOPCIDeviceResetTypeHotReset = 11,
        kIOPCIDeviceResetOptionNone = 0 };
-static int info_count, warn_count, logs, calls, function_ret, hot_ret;
+static int info_count, warn_count, logs, calls, function_ret;
 #define IOLog(...) (++logs)
 #define info_report(...) (++info_count)
 #define warn_report(...) (++warn_count)
@@ -31,9 +30,8 @@ struct IOPCIDevice {
     kern_return_t Reset(int type, int option) {
         assert(option == kIOPCIDeviceResetOptionNone);
         ++calls;
-        if (type == kIOPCIDeviceResetTypeFunctionReset) return function_ret;
-        assert(type == kIOPCIDeviceResetTypeHotReset);
-        return hot_ret;
+        assert(type == kIOPCIDeviceResetTypeFunctionReset);
+        return function_ret;
     }
 };
 struct VFIOUserPCIDriverUserClient {
@@ -78,12 +76,10 @@ int main() {
     pci_available = false;
     assert(vfio_user_reset_device(&client) == kIOReturnUnsupported);
     pci_available = true;
-    function_ret = 0; hot_ret = 5; calls = logs = 0;
+    function_ret = 0; calls = logs = 0;
     assert(vfio_user_reset_device(&client) == 0 && calls == 1 && logs == 2);
-    function_ret = 7; hot_ret = 0; calls = logs = 0;
-    assert(vfio_user_reset_device(&client) == 0 && calls == 2 && logs == 4);
-    hot_ret = 8; calls = logs = 0;
-    assert(vfio_user_reset_device(&client) == 8 && calls == 2 && logs == 4);
+    function_ret = 7; calls = logs = 0;
+    assert(vfio_user_reset_device(&client) == 7 && calls == 1 && logs == 3);
 
     VFIODevice dev = { "gpu", 0 };
     assert(apple_vfio_device_reset(&dev) == -ENODEV);
@@ -105,6 +101,8 @@ def main():
     qemu = QEMU.read_text()
     qstart = qemu.index("static int apple_vfio_device_reset(")
     qend = qemu.index("\nstatic ", qstart + 1)
+    if "requesting hot reset" in dext[start:end]:
+        raise AssertionError("DriverKit reset must not escalate to hot reset")
     with tempfile.TemporaryDirectory() as directory:
         source = pathlib.Path(directory) / "reset.cpp"
         binary = pathlib.Path(directory) / "reset"

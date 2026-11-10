@@ -1821,22 +1821,17 @@ vfio_user_reset_device(VFIOUserPCIDriverUserClient *client)
 
     /*
      * IOPCIDevice::Reset() handles config save/restore, link training, and
-     * device-ready polling internally.  Prefer FLR; fall back to an
-     * upstream-port hot reset (secondary bus reset) if the function
-     * doesn't advertise FLR.
+     * device-ready polling internally. Do not escalate a failed function
+     * reset to a hot reset, which could affect devices sharing the bridge.
      */
     IOLog("vfio-user-dext: reset: requesting function reset\n");
     kern_return_t ret = pciDevice->Reset(kIOPCIDeviceResetTypeFunctionReset,
                                          kIOPCIDeviceResetOptionNone);
     IOLog("vfio-user-dext: reset: function reset returned %#x\n", ret);
-    if (ret == kIOReturnSuccess) {
-        return ret;
+    if (ret != kIOReturnSuccess) {
+        IOLog("vfio-user-dext: reset: function reset failed; no automatic "
+              "retry or hot reset will be attempted\n");
     }
-
-    IOLog("vfio-user-dext: reset: requesting hot reset\n");
-    ret = pciDevice->Reset(kIOPCIDeviceResetTypeHotReset,
-                           kIOPCIDeviceResetOptionNone);
-    IOLog("vfio-user-dext: reset: hot reset returned %#x\n", ret);
     return ret;
 }
 

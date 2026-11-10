@@ -66,7 +66,10 @@ static int apple_vfio_query_dirty_bitmap(const VFIOContainer *bcontainer,
 
 static int apple_vfio_pci_hot_reset(VFIODevice *vbasedev, bool single)
 {
-    return 0;
+    (void)single;
+    warn_report("vfio-apple: hot reset is unsupported for %s",
+                vbasedev->name);
+    return -ENOTSUP;
 }
 
 static AppleVFIOContainer *apple_vfio_container_connect(AddressSpace *as,

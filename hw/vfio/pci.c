@@ -3754,6 +3754,28 @@ static void vfio_exitfn(PCIDevice *pdev)
     }
 }
 
+static int vfio_pci_reset_once(VFIOPCIDevice *vdev)
+{
+    int ret = -ENOTSUP;
+
+    if (vdev->vbasedev.reset_works && vdev->vbasedev.io_ops &&
+        vdev->vbasedev.io_ops->device_reset) {
+        ret = vdev->vbasedev.io_ops->device_reset(&vdev->vbasedev);
+    }
+
+    if (ret) {
+        warn_report("vfio-apple: one-shot function reset failed for %s "
+                    "(%d); no bus or power-management reset was attempted. "
+                    "Manual device recovery may be required",
+                    vdev->vbasedev.name, ret);
+    } else {
+        info_report("vfio-apple: one-shot function reset returned success "
+                    "for %s; device readiness is not verified",
+                    vdev->vbasedev.name);
+    }
+    return ret;
+}
+
 static void vfio_pci_reset(DeviceState *dev)
 {
     VFIOPCIDevice *vdev = VFIO_PCI_DEVICE(dev);
@@ -3769,6 +3791,11 @@ static void vfio_pci_reset(DeviceState *dev)
 
     if (vdev->display != ON_OFF_AUTO_OFF) {
         vfio_display_reset(vdev);
+    }
+
+    if (vdev->reset_once) {
+        vfio_pci_reset_once(vdev);
+        goto post_reset;
     }
 
     if (vdev->resetfn && !vdev->resetfn(vdev)) {

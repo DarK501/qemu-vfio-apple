@@ -225,11 +225,20 @@ Interrupt-source cancellation is asynchronous. The client stop retains its
 state and returns `kIOReturnStillOpen` until cancellation completes. A later
 Stop invocation is required to finish cleanup; automatic retry behavior is not
 verified, and DriverKit may still force teardown.
-QEMU reports each backend reset request and result. The dext logs the
-function reset attempt and, if that fails, the hot-reset fallback and their
-DriverKit return codes as `vfio-user-dext: reset:`. A successful return does
-not prove the GPU is ready for another guest driver initialization; a hot
-reset can also affect devices on the same downstream bus.
+For Apple VFIO, QEMU performs one DriverKit function-reset request per reset
+event. A failed request is logged with a warning that no bus or power-
+management reset was attempted and manual recovery may be required. The dext
+logs the function-reset attempt and result as `vfio-user-dext: reset:`; it
+does not automatically escalate to a hot reset. The Apple hot-reset callback
+returns unsupported rather than reporting success without doing a reset. A
+successful function-reset return does not prove the GPU is ready for guest
+driver initialization. If reset fails or the GPU does not recover, stop
+repeated reset attempts and use an explicit recovery procedure; any eGPU
+power-cycle should be done only after safely shutting down the VM and host
+services. QEMU's PCI reset callback cannot return this host error to the
+guest, so a failed host reset is reported in QEMU's warning log while the VM
+reset sequence continues; guest-driver readiness must be checked separately.
+Reset behavior and recovery have not been verified on hardware.
 The connection, claim, BAR isolation, guest protocol, mapping, response and teardown mock
 checks run from the repository root with
 `python3 contrib/apple-dma/tests/run_tests.py`. They require C and C++
