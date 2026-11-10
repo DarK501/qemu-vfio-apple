@@ -260,7 +260,7 @@ Rebuild the existing Darwin x86_64 QEMU build with VFIO support, refresh
 ``dist/``, then run from the repository root (the example uses the previously
 observed BDF and alignment)::
 
-  ninja -C build qemu-system-x86_64
+  ninja -C build
   ./contrib/apple-vfio/scripts/make-dist.sh
 
   python3 contrib/apple-vfio/scripts/dma_pool_alias_probe.py \
