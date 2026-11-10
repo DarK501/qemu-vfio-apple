@@ -417,6 +417,36 @@ allocation and alias the host mapping, for one eight-byte location at offset
 zero. It does not show Linux access, executable use, DMA-pool attachment,
 device DMA, coherency with the GPU, quiescence, or general teardown safety.
 
+Minimal guest-module design (source review only, Linux v7.0)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A module cannot create a restricted SWIOTLB pool: the pool initialiser is
+``static`` and reachable only through reserved-memory (OF) hooks, and
+``dma_declare_coherent_memory()`` is not exported and covers only coherent
+allocations. The remaining supported hook is per-device ``dma_map_ops`` via
+``set_dma_ops()``, which needs ``CONFIG_ARCH_HAS_DMA_OPS``. On x86 that is
+selected only with ``GART_IOMMU`` or ``XEN``; whether the target kernel has it
+must be read from its configuration, not assumed. The existing ``apple_dma``
+module needs the dispatch kernel patch only because it forwards to the
+original (NULL, i.e. direct) ops. A pool-only module that implements every
+operation itself would not need that patch.
+
+Such a module would register one ``dma_map_ops`` for the GPU that bounces
+through the identity-mapped pool, using a spinlock-protected allocator so it
+can run in atomic context. Required operations: ``alloc``/``free`` (aligned
+to the allocation's page order), ``map_phys``/``map_page`` and unmap with
+direction-aware copies, ``map_sg``/``unmap_sg``, ``sync_*``,
+``dma_supported``, ``get_required_mask`` and ``max_mapping_size``, plus
+``mmap``/``get_sgtable`` for coherent buffers.
+
+Open risks, none measured: the pool range arrives as pmem/DAX or reserved
+memory, so memory without ``struct page`` breaks callers that apply
+``virt_to_page()`` to coherent buffers (the DAX ``kmem`` route would instead
+make it ordinary System RAM that the kernel allocates from); a 256 MiB pool
+is exhausted by large GTT use and streaming bounce copies cost bandwidth;
+the CPU mapping's cacheability relative to GPU DMA is unknown; and executable
+or wide-access behaviour of the RAM-device mapping is untested.
+
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
 does not allocate memory, open a device, start a VM, or validate DMA. It
