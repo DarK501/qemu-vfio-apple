@@ -14,6 +14,7 @@ FAKE_QEMU = r"""
 import json, os, signal, socket, sys
 args = sys.argv
 assert "q35,accel=hvf,nvdimm=on" in args
+assert "-S" in args
 backend = args[args.index("-object") + 1]
 live = backend.startswith("memory-backend-apple-dma,")
 assert live or backend == "memory-backend-ram,id=poolprobe,size=268435456"
@@ -37,6 +38,13 @@ while True:
             stream.write(b'{"error":{"desc":"placement rejected"}}\n')
             continue
         assert device["driver"] in ("nvdimm", "pc-dimm")
+        if "diagnostic-ram-device=on" in backend:
+            flags = "0x07/RWX" if "bdf=44:00.3" in backend else "0x03/RW-"
+            address = device["addr"] + (4096 if "bdf=44:00.4" in backend else 0)
+            size = 0xfff0000 if "bdf=44:00.5" in backend else 0x10000000
+            print(f"hvf_vm_map paddr:0x{address:016x} "
+                  f"size:0x{size:x} vaddr:0x1000 flags:{flags}",
+                  file=sys.stderr, flush=True)
         value = {}
     elif name == "qom-get":
         assert live
@@ -117,6 +125,43 @@ class HVFBaselineTest(unittest.TestCase):
             text=True, capture_output=True, timeout=15)
         self.assertEqual(result.returncode, 2)
         self.assertIn("--confirm-claim", result.stderr)
+
+    def test_driverkit_ram_device_rw_trace(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--qemu", str(self.qemu),
+             "--firmware", self.directory.name, "--bdf", "44:00.0",
+             "--confirm-claim", "--diagnostic-ram-device", "--timeout", "5"],
+            text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertEqual(output["result"], "driverkit-hvf-rw-hotplug-observed")
+        self.assertIn("0x03/RW-", output["qemu_stderr"])
+
+    def test_driverkit_ram_device_rejects_unmatched_trace(self):
+        for bdf in ("44:00.3", "44:00.4", "44:00.5"):
+            with self.subTest(bdf=bdf):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--qemu", str(self.qemu),
+                     "--firmware", self.directory.name, "--bdf", bdf,
+                     "--confirm-claim", "--diagnostic-ram-device",
+                     "--timeout", "5"],
+                    text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("RW-only HVF mapping trace not found", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_ram_device_requires_driverkit_nvdimm(self):
+        for args in (["--address", "0x128000000"],
+                     ["--bdf", "44:00.0", "--confirm-claim",
+                      "--device", "pc-dimm"]):
+            with self.subTest(args=args):
+                result = subprocess.run(
+                    [sys.executable, str(SCRIPT), "--qemu", str(self.qemu),
+                     "--firmware", self.directory.name, *args,
+                     "--diagnostic-ram-device"],
+                    text=True, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("requires --bdf and --device nvdimm", result.stderr)
 
     def test_driverkit_abort_reports_signal_and_output(self):
         result = subprocess.run(

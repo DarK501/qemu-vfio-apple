@@ -36,6 +36,7 @@ struct AppleDMAMemoryBackend {
     mach_vm_size_t mapping_size;
     io_connect_t connection;
     bool claimed;
+    bool diagnostic_ram_device;
     uint64_t test_offset;
 };
 
@@ -211,9 +212,15 @@ static bool apple_dma_backend_alloc(HostMemoryBackend *hostmem, Error **errp)
     hostmem->merge = false;
     hostmem->dump = true;
     hostmem->prealloc = false;
-    memory_region_init_ram_ptr(&hostmem->mr, OBJECT(hostmem),
-                               "apple-dma-pool", hostmem->size,
-                               (void *)(uintptr_t)backend->mapping);
+    if (backend->diagnostic_ram_device) {
+        memory_region_init_ram_device_ptr(&hostmem->mr, OBJECT(hostmem),
+                                           "apple-dma-pool", hostmem->size,
+                                           (void *)(uintptr_t)backend->mapping);
+    } else {
+        memory_region_init_ram_ptr(&hostmem->mr, OBJECT(hostmem),
+                                   "apple-dma-pool", hostmem->size,
+                                   (void *)(uintptr_t)backend->mapping);
+    }
     /*
      * ram_ptr regions leave mr->align at 0, which makes memory-device
      * plug code compute size % 0.
@@ -281,6 +288,24 @@ static void apple_dma_set_host_root(Object *obj, const char *value,
     }
     g_free(backend->host_root);
     backend->host_root = g_strdup(value);
+}
+
+static bool apple_dma_get_diagnostic_ram_device(Object *obj, Error **errp)
+{
+    return MEMORY_BACKEND_APPLE_DMA(obj)->diagnostic_ram_device;
+}
+
+static void apple_dma_set_diagnostic_ram_device(Object *obj, bool value,
+                                                 Error **errp)
+{
+    AppleDMAMemoryBackend *backend = MEMORY_BACKEND_APPLE_DMA(obj);
+
+    if (host_memory_backend_mr_inited(MEMORY_BACKEND(obj))) {
+        error_setg(errp, "diagnostic-ram-device cannot be changed after "
+                   "allocation");
+        return;
+    }
+    backend->diagnostic_ram_device = value;
 }
 
 static void apple_dma_get_alignment(Object *obj, Visitor *v, const char *name,
@@ -423,6 +448,9 @@ static void apple_dma_backend_class_init(ObjectClass *oc, const void *data)
     object_class_property_add_str(oc, "host-root",
                                   apple_dma_get_host_root,
                                   apple_dma_set_host_root);
+    object_class_property_add_bool(oc, "diagnostic-ram-device",
+                                  apple_dma_get_diagnostic_ram_device,
+                                  apple_dma_set_diagnostic_ram_device);
     object_class_property_add(oc, "alignment", "int",
                               apple_dma_get_alignment,
                               apple_dma_set_alignment,

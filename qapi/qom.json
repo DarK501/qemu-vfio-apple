@@ -792,13 +792,18 @@
 #
 # @alignment: required DMA address alignment in bytes
 #
+# @diagnostic-ram-device: use RAM-device semantics for paused mapping
+#     diagnostics only (default: false); not suitable as ordinary
+#     guest RAM
+#
 # Since: 11.0
 ##
 { 'struct': 'MemoryBackendAppleDmaProperties',
   'base': 'MemoryBackendProperties',
   'data': { 'bdf': 'str',
             '*host-root': 'str',
-            '*alignment': 'size' },
+            '*alignment': 'size',
+            '*diagnostic-ram-device': 'bool' },
   'if': 'CONFIG_DARWIN' }
 
 ##

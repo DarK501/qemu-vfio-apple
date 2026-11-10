@@ -311,8 +311,10 @@ This comparison does not boot the guest or validate Linux or physical DMA.
 
 On the tested Intel Mac, the synthetic NVDIMM mapped successfully with RWX
 permissions at ``0x128000000``, but the live DriverKit-backed NVDIMM failed
-at the same address, length and permissions. This narrows the difference to
-the allocation or its host mapping but does not establish a specific cause.
+at the same address, length and permissions. In the direct host probe below,
+ordinary memory mapped successfully as both RW and RWX; the DriverKit mapping
+succeeded as RW and failed as RWX. This identifies a permissions-dependent
+difference, not the underlying host restriction or a complete solution.
 The host-only ``probe-dma-hvf.c`` compares RW and RWX ``hv_vm_map`` requests
 on the same DriverKit mapping and an ordinary anonymous-memory control. It
 creates an HVF VM but no vCPU, does not boot a guest, and does not issue GPU
@@ -333,6 +335,22 @@ then destroys the HVF VM before releasing the CPU mapping, DMA buffer and
 claim. It requires both ordinary-memory controls and the DriverKit RW map to
 succeed for a complete result; an RWX failure is reported rather than hidden.
 The output can contain host virtual addresses. Review it before sharing.
+
+For a further paused QEMU experiment, build and distribute the current QEMU
+binary and run::
+
+  python3 contrib/apple-vfio/scripts/dma_pool_hvf_baseline.py \
+    --qemu "$PWD/dist/qemu-system-x86_64" \
+    --firmware "$PWD/dist/share/qemu" \
+    --bdf 44:00.0 --confirm-claim --diagnostic-ram-device
+
+The opt-in backend property uses QEMU RAM-device semantics, making HVF request
+RW rather than RWX. The runner requires an RW mapping trace for the exact
+allocation address and length. It starts no vCPU and claims the device, with
+the same bus-mastering and abort/cleanup risks described above. RAM-device
+semantics differ from ordinary RAM, and this non-executable mapping must not
+be used as guest System RAM or as a supported Linux DMA pool. A pass establishes
+neither guest CPU access nor device DMA, coherency, or safe teardown.
 
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it

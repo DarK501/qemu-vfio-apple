@@ -17,14 +17,27 @@ SIZE = 256 * 1024 * 1024
 ALIGNMENT = 128 * 1024 * 1024
 
 
-def probe(qemu, firmware, address, device, timeout, bdf=None):
+def has_rw_mapping_trace(output, address):
+    pattern = (r"hvf_vm_map paddr:0x([0-9a-fA-F]+) "
+               r"size:0x([0-9a-fA-F]+) vaddr:\S+ flags:0x([0-9a-fA-F]+)/RW-")
+    return any(int(gpa, 16) == address and int(size, 16) == SIZE and
+               int(flags, 16) == 3
+               for gpa, size, flags in re.findall(pattern, output))
+
+
+def probe(qemu, firmware, address, device, timeout, bdf=None,
+          diagnostic_ram_device=False):
     if bdf is not None and not re.fullmatch(r"[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", bdf):
         raise ValueError("bdf must have the form BB:DD.F")
+    if diagnostic_ram_device and (not bdf or device != "nvdimm"):
+        raise ValueError("RAM-device diagnostic requires a DriverKit NVDIMM")
     with tempfile.TemporaryDirectory(prefix="dma-pool-hvf-") as directory:
         path = os.path.join(directory, "qmp.sock")
         backend = (f"memory-backend-apple-dma,id=poolprobe,size={SIZE},"
                    f"alignment={ALIGNMENT},bdf={bdf}" if bdf else
                    f"memory-backend-ram,id=poolprobe,size={SIZE}")
+        if diagnostic_ram_device:
+            backend += ",diagnostic-ram-device=on"
         args = [
             qemu, "-L", firmware, "-machine", "q35,accel=hvf,nvdimm=on",
             "-cpu", "host", "-nodefaults", "-display", "none", "-S",
@@ -97,9 +110,13 @@ def probe(qemu, firmware, address, device, timeout, bdf=None):
                 output = stderr.read().decode("utf-8", errors="replace")
                 if bdf and "failed to release DMA pool" in output:
                     raise RuntimeError("QEMU reported a DMA pool cleanup failure")
+                if diagnostic_ram_device and not has_rw_mapping_trace(output, address):
+                    raise RuntimeError("expected RW-only HVF mapping trace not found")
                 graceful = True
                 return {
-                    "result": ("driverkit-hvf-hotplug-observed" if bdf else
+                    "result": ("driverkit-hvf-rw-hotplug-observed"
+                               if diagnostic_ram_device else
+                               "driverkit-hvf-hotplug-observed" if bdf else
                                "synthetic-hvf-hotplug-observed"),
                     "memory_device": actual,
                     "qemu_stderr": output,
@@ -107,7 +124,8 @@ def probe(qemu, firmware, address, device, timeout, bdf=None):
                         "guest CPU or Linux access",
                         "physical device DMA, coherency, or quiescence",
                         "general host DMA lifecycle safety",
-                    ],
+                    ] + (["RAM-device semantics are suitable for guest RAM"]
+                         if diagnostic_ram_device else []),
                 }
             except (OSError, RuntimeError, TimeoutError,
                     subprocess.TimeoutExpired) as exc:
@@ -165,15 +183,21 @@ def main():
                         help="confirm that the selected device will be claimed")
     parser.add_argument("--device", choices=("nvdimm", "pc-dimm"),
                         default="nvdimm")
+    parser.add_argument("--diagnostic-ram-device", action="store_true",
+                        help="use experimental RW-only RAM-device semantics "
+                             "for a paused DriverKit NVDIMM diagnostic")
     parser.add_argument("--timeout", type=int, default=30)
     args = parser.parse_args()
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     if bool(args.bdf) != args.confirm_claim:
         parser.error("--bdf and --confirm-claim must be supplied together")
+    if args.diagnostic_ram_device and (not args.bdf or args.device != "nvdimm"):
+        parser.error("--diagnostic-ram-device requires --bdf and --device nvdimm")
     try:
         result = probe(args.qemu, args.firmware, args.address,
-                       args.device, args.timeout, args.bdf)
+                       args.device, args.timeout, args.bdf,
+                       args.diagnostic_ram_device)
         if not args.bdf:
             result["not_verified"].insert(
                 0, "DriverKit-backed allocation can be mapped by HVF")
