@@ -30,7 +30,9 @@ static bool probe_cpu_alias(io_connect_t conn, uint64_t size,
                                                 &mappings[i].address,
                                                 &mappings[i].size,
                                                 kIOMapAnywhere);
-        printf("CPU map %u: %#x\n", i, kr);
+        printf("CPU map %u: kr=%#x address=%#llx size=%#llx\n", i, kr,
+               (unsigned long long)mappings[i].address,
+               (unsigned long long)mappings[i].size);
         if (kr != KERN_SUCCESS) {
             return false;
         }
@@ -47,7 +49,7 @@ static bool probe_cpu_alias(io_connect_t conn, uint64_t size,
     uint64_t first = mappings[0].address, second = mappings[1].address;
     if ((first <= second && second - first < size) ||
         (second <= first && first - second < size)) {
-        fprintf(stderr, "CPU mappings overlap; cannot establish independent aliases\n");
+        fprintf(stderr, "CPU mappings overlap; alias test is inconclusive\n");
         return false;
     }
 
@@ -84,6 +86,15 @@ static bool unmap_cpu_alias(io_connect_t conn, DMACpuMapping mappings[2])
     bool ok = true;
     for (unsigned int i = 0; i < 2; i++) {
         if (mappings[i].mapped) {
+            if (i == 1 && mappings[0].address == mappings[1].address &&
+                !mappings[0].mapped) {
+                mappings[i].mapped = false;
+                printf("CPU map %u reused map 0; no second unmap\n", i);
+                continue;
+            }
+            if (i == 1 && mappings[0].address == mappings[1].address) {
+                continue;
+            }
             kern_return_t kr = IOConnectUnmapMemory64(conn, 0, mach_task_self(),
                                                        mappings[i].address);
             printf("CPU unmap %u: %#x\n", i, kr);
@@ -191,7 +202,7 @@ int main(int argc, char **argv)
     io_connect_t conn = IO_OBJECT_NULL;
     kern_return_t kr;
     int claimed = 0, allocation_attempted = 0, failed = 0;
-    bool test_alias = false, buffer_freed = false;
+    bool test_alias = false, mappings_unmapped = true;
     DMACpuMapping mappings[2] = {0};
 
     if ((argc < 3 || argc > 5) ||
@@ -280,23 +291,26 @@ int main(int argc, char **argv)
     }
 
     if (allocation_attempted) {
+        mappings_unmapped = unmap_cpu_alias(conn, mappings);
+        if (!mappings_unmapped) {
+            failed = 1;
+            fprintf(stderr, "CPU unmap failed; skipping explicit DMA buffer "
+                    "free and claim release; client close may attempt cleanup\n");
+        }
+    }
+
+    if (allocation_attempted && mappings_unmapped) {
         kr = IOConnectCallMethod(conn, 4, NULL, 0, NULL, 0, NULL, NULL,
                                  NULL, NULL);
         printf("free DMA buffer: %#x\n", kr);
         if (kr != KERN_SUCCESS) {
             failed = 1;
-            fprintf(stderr, "DMA completion failed; mappings cannot be "
-                    "safely released by the probe\n");
-        } else {
-            buffer_freed = true;
+            fprintf(stderr, "DMA completion failed; claim release will be "
+                    "refused while the allocation remains live\n");
         }
     }
 
-    if (buffer_freed && !unmap_cpu_alias(conn, mappings)) {
-        failed = 1;
-    }
-
-    if (claimed) {
+    if (claimed && mappings_unmapped) {
         kr = IOConnectCallMethod(conn, 20, NULL, 0, NULL, 0, NULL, NULL,
                                  NULL, NULL);
         printf("release claim: %#x\n", kr);

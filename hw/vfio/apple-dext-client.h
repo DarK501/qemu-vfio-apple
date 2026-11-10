@@ -124,7 +124,10 @@ kern_return_t apple_dext_client_allocate_dma_buffer(io_connect_t connection,
 
 /*
  * Free a DMA buffer previously allocated with apple_dext_client_allocate_dma_buffer.
- * Unmaps the buffer from this process and releases it in the dext.
+ * Unmaps the buffer from this process while the dext descriptor is still
+ * available, then completes and releases it in the dext. The caller must
+ * stop all CPU access before calling. The dext retains the allocation if
+ * unmapping fails.
  *
  * @addr: the mapped address returned by apple_dext_client_allocate_dma_buffer
  */

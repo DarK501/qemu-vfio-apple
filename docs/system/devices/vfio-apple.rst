@@ -161,11 +161,13 @@ prove guest placement, Linux pool attachment, or physical DMA correctness.
 
 With the device idle and no VM using it, the optional CPU alias check maps the
 same prepared DriverKit buffer twice in the probe process, tests writes in
-both directions at three offsets, completes DMA, unmaps and releases the claim::
+both directions at three offsets if distinct mappings are returned, unmaps,
+completes DMA and releases the claim::
 
   /tmp/probe-dma-allocation BUS:DEVICE.FUNCTION VENDOR:DEVICE 0x8000000 --cpu-alias
 
 The two CPU mappings must be distinct and cover the requested allocation.
+IOKit may reuse a compatible mapping, so overlap makes this test inconclusive.
 This tests only CPU visibility between two host mappings. It neither maps the
 buffer into QEMU nor proves device coherency, guest visibility or safety. A
 failed completion or unmap requires investigation; do not assume the DMA

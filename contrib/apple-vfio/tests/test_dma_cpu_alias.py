@@ -94,7 +94,7 @@ int main(void)
     mappings[0] = (DMACpuMapping){0}; mappings[1] = (DMACpuMapping){0};
     addresses[1] = first;
     assert(!probe_cpu_alias(1, 4096, mappings));
-    assert(unmap_cpu_alias(1, mappings));
+    assert(unmap_cpu_alias(1, mappings) && unmap_count == 1);
     reset();
     mappings[0] = (DMACpuMapping){0}; mappings[1] = (DMACpuMapping){0};
     addresses[1] = different;

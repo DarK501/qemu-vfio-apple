@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify bounce-buffer IPC completes before unmapping its host address."""
+"""Verify bounce-buffer unmapping precedes DriverKit completion."""
 
 import pathlib
 import subprocess
@@ -33,7 +33,7 @@ static int IOConnectCallMethod(int conn, int selector, void *input,
 static int IOConnectUnmapMemory64(int conn, int type, int task, uintptr_t addr)
 {
     assert(conn == 1 && type == 0 && task == 7 && addr == 0x1000);
-    assert(calls == 1);
+    assert(calls == 0);
     unmaps++;
     return unmap_result;
 }
@@ -43,15 +43,17 @@ SUFFIX = r"""
 int main(void)
 {
     assert(apple_dext_client_free_dma_buffer(0, 0x1000) == kIOReturnBadArgument);
-    call_result = 9;
-    assert(apple_dext_client_free_dma_buffer(1, 0x1000) == 9);
-    assert(calls == 1 && !unmaps);
-    calls = 0;
-    call_result = 0;
     unmap_result = 8;
     assert(apple_dext_client_free_dma_buffer(1, 0x1000) == 8);
-    assert(calls == 1 && unmaps == 1);
+    assert(calls == 0 && unmaps == 1);
     calls = unmaps = unmap_result = 0;
+    call_result = 9;
+    assert(apple_dext_client_free_dma_buffer(1, 0x1000) == 9);
+    assert(calls == 1 && unmaps == 1);
+    calls = unmaps = call_result = 0;
+    assert(apple_dext_client_free_dma_buffer(1, 0x1000) == KERN_SUCCESS);
+    assert(calls == 1 && unmaps == 1);
+    calls = unmaps = 0;
     assert(apple_dext_client_free_dma_buffer(1, 0) == KERN_SUCCESS);
     assert(calls == 1 && !unmaps);
 }

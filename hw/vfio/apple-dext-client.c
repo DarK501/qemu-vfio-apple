@@ -592,11 +592,15 @@ apple_dext_client_allocate_dma_buffer(io_connect_t connection,
     return kIOReturnSuccess;
 
 rollback: {
-        kern_return_t cleanup = apple_dext_client_free_dma_buffer(connection,
-                                                                   addr);
-        if (cleanup == KERN_SUCCESS && mapped && addr == 0) {
+        kern_return_t cleanup;
+        if (mapped && addr == 0) {
             cleanup = IOConnectUnmapMemory64(connection, 0, mach_task_self(),
                                             addr);
+            if (cleanup == KERN_SUCCESS) {
+                cleanup = apple_dext_client_free_dma_buffer(connection, 0);
+            }
+        } else {
+            cleanup = apple_dext_client_free_dma_buffer(connection, addr);
         }
         if (cleanup != KERN_SUCCESS) {
             error_report("vfio-apple: DMA allocation rollback failed "
@@ -618,14 +622,14 @@ apple_dext_client_free_dma_buffer(io_connect_t connection,
         return kIOReturnBadArgument;
     }
 
-    kr = IOConnectCallMethod(connection,
-                             kSelectorFreeDMABuffer,
-                             NULL, 0, NULL, 0,
-                             NULL, NULL, NULL, NULL);
-    if (kr == KERN_SUCCESS && addr != 0) {
+    if (addr != 0) {
         kr = IOConnectUnmapMemory64(connection, 0, mach_task_self(), addr);
+        if (kr != KERN_SUCCESS) {
+            return kr;
+        }
     }
-    return kr;
+    return IOConnectCallMethod(connection, kSelectorFreeDMABuffer,
+                               NULL, 0, NULL, 0, NULL, NULL, NULL, NULL);
 }
 
 kern_return_t
