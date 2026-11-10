@@ -7,6 +7,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <mach/mach.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -14,6 +15,87 @@
 
 #define DMA_PROBE_SIZE (256ULL * 1024 * 1024)
 #define DMA_PROBE_DEFAULT_ALIGNMENT 4096ULL
+
+typedef struct DMACpuMapping {
+    mach_vm_address_t address;
+    mach_vm_size_t size;
+    bool mapped;
+} DMACpuMapping;
+
+static bool probe_cpu_alias(io_connect_t conn, uint64_t size,
+                            DMACpuMapping mappings[2])
+{
+    for (unsigned int i = 0; i < 2; i++) {
+        kern_return_t kr = IOConnectMapMemory64(conn, 0, mach_task_self(),
+                                                &mappings[i].address,
+                                                &mappings[i].size,
+                                                kIOMapAnywhere);
+        printf("CPU map %u: %#x\n", i, kr);
+        if (kr != KERN_SUCCESS) {
+            return false;
+        }
+        mappings[i].mapped = true;
+        if (mappings[i].address == 0 || mappings[i].size < size ||
+            mappings[i].address > UINTPTR_MAX ||
+            size - 1 > UINTPTR_MAX - mappings[i].address) {
+            fprintf(stderr, "CPU map %u does not cover the requested buffer\n",
+                    i);
+            return false;
+        }
+    }
+
+    uint64_t first = mappings[0].address, second = mappings[1].address;
+    if ((first <= second && second - first < size) ||
+        (second <= first && first - second < size)) {
+        fprintf(stderr, "CPU mappings overlap; cannot establish independent aliases\n");
+        return false;
+    }
+
+    volatile uint8_t *a = (volatile uint8_t *)(uintptr_t)first;
+    volatile uint8_t *b = (volatile uint8_t *)(uintptr_t)second;
+    const uint64_t offsets[] = {0, size / 2, size - 1};
+    for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+        uint64_t offset = offsets[i];
+        uint8_t saved = a[offset];
+        uint8_t value = (uint8_t)(saved ^ 0x5a);
+        a[offset] = value;
+        if (b[offset] != value) {
+            fprintf(stderr, "CPU alias mismatch: map 0 -> map 1 at offset %#llx\n",
+                    (unsigned long long)offset);
+            a[offset] = saved;
+            return false;
+        }
+        value ^= 0xff;
+        b[offset] = value;
+        if (a[offset] != value) {
+            fprintf(stderr, "CPU alias mismatch: map 1 -> map 0 at offset %#llx\n",
+                    (unsigned long long)offset);
+            a[offset] = saved;
+            return false;
+        }
+        a[offset] = saved;
+    }
+    printf("CPU alias: PASS (three offsets, both directions)\n");
+    return true;
+}
+
+static bool unmap_cpu_alias(io_connect_t conn, DMACpuMapping mappings[2])
+{
+    bool ok = true;
+    for (unsigned int i = 0; i < 2; i++) {
+        if (mappings[i].mapped) {
+            kern_return_t kr = IOConnectUnmapMemory64(conn, 0, mach_task_self(),
+                                                       mappings[i].address);
+            printf("CPU unmap %u: %#x\n", i, kr);
+            if (kr != KERN_SUCCESS) {
+                ok = false;
+            } else {
+                mappings[i].mapped = false;
+            }
+        }
+    }
+    return ok;
+}
 
 static int parse_device(const char *bdf, const char *id,
                         unsigned int *bus, unsigned int *device,
@@ -109,15 +191,19 @@ int main(int argc, char **argv)
     io_connect_t conn = IO_OBJECT_NULL;
     kern_return_t kr;
     int claimed = 0, allocation_attempted = 0, failed = 0;
+    bool test_alias = false, buffer_freed = false;
+    DMACpuMapping mappings[2] = {0};
 
-    if ((argc != 3 && argc != 4) ||
+    if ((argc < 3 || argc > 5) ||
+        (argc == 5 && strcmp(argv[4], "--cpu-alias") != 0) ||
         !parse_device(argv[1], argv[2], &bus, &device, &function,
                       &vendor, &product)) {
         fprintf(stderr, "usage: %s BUS:DEVICE.FUNCTION VENDOR:DEVICE "
-                "[ALIGNMENT]\n", argv[0]);
+                "[ALIGNMENT [--cpu-alias]]\n", argv[0]);
         return 2;
     }
-    if (argc == 4) {
+    test_alias = argc == 5;
+    if (argc >= 4) {
         char *end = NULL;
         unsigned long long parsed;
 
@@ -186,6 +272,10 @@ int main(int argc, char **argv)
                 fprintf(stderr, "DMA allocation result is incomplete\n");
                 failed = 1;
             }
+            if (!failed && test_alias &&
+                !probe_cpu_alias(conn, DMA_PROBE_SIZE, mappings)) {
+                failed = 1;
+            }
         }
     }
 
@@ -195,7 +285,15 @@ int main(int argc, char **argv)
         printf("free DMA buffer: %#x\n", kr);
         if (kr != KERN_SUCCESS) {
             failed = 1;
+            fprintf(stderr, "DMA completion failed; mappings cannot be "
+                    "safely released by the probe\n");
+        } else {
+            buffer_freed = true;
         }
+    }
+
+    if (buffer_freed && !unmap_cpu_alias(conn, mappings)) {
+        failed = 1;
     }
 
     if (claimed) {

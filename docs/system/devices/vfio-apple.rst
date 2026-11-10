@@ -159,6 +159,18 @@ by sample ID. Treat those addresses as sensitive. A passing run demonstrates
 only that DriverKit prepared and then completed that host mapping; it does not
 prove guest placement, Linux pool attachment, or physical DMA correctness.
 
+With the device idle and no VM using it, the optional CPU alias check maps the
+same prepared DriverKit buffer twice in the probe process, tests writes in
+both directions at three offsets, completes DMA, unmaps and releases the claim::
+
+  /tmp/probe-dma-allocation BUS:DEVICE.FUNCTION VENDOR:DEVICE 0x8000000 --cpu-alias
+
+The two CPU mappings must be distinct and cover the requested allocation.
+This tests only CPU visibility between two host mappings. It neither maps the
+buffer into QEMU nor proves device coherency, guest visibility or safety. A
+failed completion or unmap requires investigation; do not assume the DMA
+mapping was safely released.
+
 To investigate guest RAM visibility without a physical device, boot a
 **separate disposable** stock x86 Linux VM without any Apple VFIO device or
 companion. In addition to its normal boot and disk arguments, configure a
