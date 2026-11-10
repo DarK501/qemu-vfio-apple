@@ -1802,20 +1802,25 @@ static kern_return_t
 vfio_user_reset_device(VFIOUserPCIDriverUserClient *client)
 {
     if (client == nullptr || client->ivars == nullptr) {
+        vfio_user_dma_log("reset: rejected: no client state (kIOReturnBadArgument)");
         return kIOReturnBadArgument;
     }
 
     if (!vfio_user_service_claimed(client)) {
+        vfio_user_dma_log("reset: rejected: device not claimed (kIOReturnNotOpen)");
         return kIOReturnNotOpen;
     }
 
     IOService *driverService = client->GetProvider();
     if (driverService == nullptr) {
+        vfio_user_dma_log("reset: rejected: no driver service (kIOReturnNotAttached)");
         return kIOReturnNotAttached;
     }
 
     IOPCIDevice *pciDevice = vfio_user_get_pci_device(driverService);
     if (pciDevice == nullptr) {
+        vfio_user_dma_log("reset: rejected: provider is not an IOPCIDevice "
+                          "(kIOReturnUnsupported from dext)");
         return kIOReturnUnsupported;
     }
 
@@ -1824,13 +1829,13 @@ vfio_user_reset_device(VFIOUserPCIDriverUserClient *client)
      * device-ready polling internally. Do not escalate a failed function
      * reset to a hot reset, which could affect devices sharing the bridge.
      */
-    IOLog("vfio-user-dext: reset: requesting function reset\n");
+    vfio_user_dma_log("reset: requesting function reset");
     kern_return_t ret = pciDevice->Reset(kIOPCIDeviceResetTypeFunctionReset,
                                          kIOPCIDeviceResetOptionNone);
-    IOLog("vfio-user-dext: reset: function reset returned %#x\n", ret);
+    vfio_user_dma_log("reset: IOPCIDevice::Reset(function) returned %#x", ret);
     if (ret != kIOReturnSuccess) {
-        IOLog("vfio-user-dext: reset: function reset failed; no automatic "
-              "retry or hot reset will be attempted\n");
+        vfio_user_dma_log("reset: function reset failed; no automatic "
+                          "retry or hot reset will be attempted");
     }
     return ret;
 }
@@ -2035,6 +2040,8 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     VFIOUserPCIDeviceIdentity identity;
     kern_return_t ret = vfio_user_read_identity(driverService, &identity);
     if (ret != kIOReturnSuccess) {
+        vfio_user_dma_log("ExternalMethod: selector %llu rejected: identity "
+                          "read failed %#x", selector, ret);
         return ret;
     }
 
@@ -2044,6 +2051,8 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
         selector != kVFIOUserPCIDriverUserClientMethodClaimSelected &&
         selector != kVFIOUserPCIDriverUserClientMethodReleaseClaim &&
         !vfio_user_service_claimed(this)) {
+        vfio_user_dma_log("ExternalMethod: selector %llu rejected: not "
+                          "claimed (kIOReturnNotOpen)", selector);
         return kIOReturnNotOpen;
     }
 
@@ -2376,7 +2385,10 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     }
 
     case kVFIOUserPCIDriverUserClientMethodResetDevice:
-        return vfio_user_reset_device(this);
+        vfio_user_dma_log("reset: ExternalMethod selector 17 dispatched");
+        ret = vfio_user_reset_device(this);
+        vfio_user_dma_log("reset: ExternalMethod selector 17 returning %#x", ret);
+        return ret;
 
     case kVFIOUserPCIDriverUserClientMethodSetIRQMask: {
         if (arguments->scalarInput == nullptr ||
@@ -2397,6 +2409,8 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     }
 
     default:
+        vfio_user_dma_log("ExternalMethod: unknown selector %llu "
+                          "(kIOReturnUnsupported)", selector);
         return kIOReturnUnsupported;
     }
 }

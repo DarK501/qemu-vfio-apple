@@ -23,6 +23,7 @@ enum { KERN_SUCCESS = 0, IO_OBJECT_NULL = 0,
        kIOPCIDeviceResetOptionNone = 0 };
 static int info_count, warn_count, logs, calls, function_ret;
 #define IOLog(...) (++logs)
+#define vfio_user_dma_log(...) (++logs)
 #define info_report(...) (++info_count)
 #define warn_report(...) (++warn_count)
 struct IOService {};
@@ -101,6 +102,12 @@ def main():
     qemu = QEMU.read_text()
     qstart = qemu.index("static int apple_vfio_device_reset(")
     qend = qemu.index("\nstatic ", qstart + 1)
+    for reason in ("no client state", "device not claimed", "no driver service",
+                   "provider is not an IOPCIDevice"):
+        if reason not in dext[start:end]:
+            raise AssertionError("missing reset early-return log: " + reason)
+    if "selector 17 dispatched" not in dext:
+        raise AssertionError("missing reset dispatch log")
     if "requesting hot reset" in dext[start:end]:
         raise AssertionError("DriverKit reset must not escalate to hot reset")
     with tempfile.TemporaryDirectory() as directory:
