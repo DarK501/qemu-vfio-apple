@@ -273,97 +273,33 @@ If the BDF is ambiguous under multiple host PCI roots, add
 ``--host-root ROOT_NAME``. The binary must include Qtest support. No guest
 disk is used, so no qcow2 overlay is needed for this paused diagnostic.
 
-Guest CPU access through an NVDIMM
-----------------------------------
+HVF synthetic hotplug diagnostic
+--------------------------------
 
-.. warning::
+The DriverKit-backed NVDIMM hotplug experiment aborted in ``hv_vm_map`` on
+the tested Intel Mac. The cause is not yet known, and an abort may bypass
+normal allocation and claim cleanup. Do not run the previously published
+NVDIMM guest-CPU procedure: the DAX namespace identity, resource offset and
+mapping alignment also remain unverified. In particular, do not create or
+modify an unverified NVDIMM namespace, or write to ordinary System RAM.
 
-  This procedure is **not ready to run**. HVF aborted in ``hv_vm_map`` when
-  the DriverKit-backed NVDIMM was hot-added on the tested Intel Mac. An abort
-  may bypass normal allocation and claim cleanup. In addition, the DAX
-  namespace's identity, resource offset, and mapping alignment must be
-  validated before comparing it with the host mapping. Do not execute the
-  commands below until the procedure has been corrected.
+To check the same hotplug placement with ordinary QEMU RAM and HVF, without
+claiming a device, allocating DriverKit memory, attaching a disk or running
+the guest CPU, use::
 
-The host-alias diagnostic does not execute guest CPU instructions. The
-following separate test exposes the same live allocation through QEMU's
-``nvdimm`` device, creates a Linux ``devdax`` namespace, and tests writes by
-the guest CPU against the host mapping. It does not attach a Linux DMA pool or
-test physical device DMA.
+  python3 contrib/apple-vfio/scripts/dma_pool_hvf_baseline.py \
+    --qemu "$PWD/dist/qemu-system-x86_64" \
+    --firmware "$PWD/dist/share/qemu" --address 0x128000000
 
-This test claims the selected PCI device and enables bus mastering. Run it
-only while the device is idle and not claimed elsewhere; a successful claim
-does not prove outstanding device DMA has drained. Use a disposable,
-persistent qcow2 overlay for the guest disk, not ``snapshot=on``. The commands
-below assume the previously built x86_64 Ubuntu image and use the BDF and
-allocation size already tested above::
-
-  cd /Users/dark/Documents/git/qemu-vfio-apple
-  IMAGE="$PWD/contrib/apple-vfio/image-builder/out/ubuntu-desktop-image-x86_64/artifacts/ubuntu-desktop-resolute-x86_64.qcow2"
-  OVERLAY="$PWD/contrib/apple-vfio/image-builder/out/ubuntu-desktop-image-x86_64/work/dma-pool-nvdimm-test.qcow2"
-  FIRMWARE="$PWD/dist/share/qemu"
-  QMP_SOCKET="/tmp/vfio-dma-pool-qmp.sock"
-  mkdir -p "$(dirname "$OVERLAY")"
-  test -f "$IMAGE" && test ! -e "$OVERLAY" && test ! -e "$QMP_SOCKET"
-  qemu-img create -f qcow2 -F qcow2 -b "$IMAGE" "$OVERLAY"
-  VARS_TEMPLATE="$FIRMWARE/edk2-i386-vars.fd"
-  test -f "$VARS_TEMPLATE" || VARS_TEMPLATE="$FIRMWARE/edk2-x86_64-vars.fd"
-  cp "$VARS_TEMPLATE" "$PWD/contrib/apple-vfio/image-builder/out/ubuntu-desktop-image-x86_64/work/dma-pool-nvdimm-test-vars.fd"
-
-Start QEMU in the foreground. This boots the guest normally; unlike the paused
-alias diagnostic, it requires the image's UEFI firmware and usable guest
-credentials. Keep this terminal open for QEMU's monitor::
-
-  ./dist/qemu-system-x86_64 \
-    -L "$FIRMWARE" -accel hvf -cpu host \
-    -machine q35,nvdimm=on -m 2G,slots=1,maxmem=2304M -smp 4 \
-    -drive if=pflash,format=raw,readonly=on,file="$FIRMWARE/edk2-x86_64-code.fd" \
-    -drive if=pflash,format=raw,file="$PWD/contrib/apple-vfio/image-builder/out/ubuntu-desktop-image-x86_64/work/dma-pool-nvdimm-test-vars.fd" \
-    -drive file="$OVERLAY",if=virtio,format=qcow2 \
-    -object memory-backend-apple-dma,id=poolprobe,size=0x10000000,alignment=0x8000000,bdf=44:00.0 \
-    -device nvdimm,id=poolprobe-dimm,memdev=poolprobe,addr=0x128000000 \
-    -qmp "unix:$QMP_SOCKET,server=on,wait=off" \
-    -netdev user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22 \
-    -device virtio-net-pci,netdev=net0 \
-    -display none -serial none -monitor stdio
-
-From another host terminal, copy the guest probe and log in using the image's
-configured credentials (the image-builder defaults are ``ubuntu`` /
-``ubuntu``)::
-
-  scp -P 2222 contrib/apple-vfio/scripts/dma_pool_dax_guest_probe.py \
-    ubuntu@127.0.0.1:/tmp/
-  ssh -p 2222 ubuntu@127.0.0.1
-
-In the guest, install ``ndctl`` if needed, create a ``devdax`` namespace on
-the test NVDIMM, and identify its device node. This initializes metadata in
-the dedicated DMA allocation, not in the guest disk::
-
-  sudo apt-get update
-  sudo apt-get install -y ndctl
-  # Do not create a namespace until the target region is positively identified.
-  sudo ndctl list -N
-
-Run the guest probe with the ``/dev/daxN.N`` node reported for that namespace
-(usually ``/dev/dax0.0``)::
-
-  sudo python3 /tmp/dma_pool_dax_guest_probe.py /dev/dax0.0
-
-It writes a fixed marker through a shared DAX mapping and waits for the host.
-While it waits, use the QMP helper in a third host terminal. The first command
-must report ``0xa1b2c3d4e5f60718``; then set the host marker::
-
-  python3 contrib/apple-vfio/scripts/dma_pool_qmp_value.py "$QMP_SOCKET" get
-  python3 contrib/apple-vfio/scripts/dma_pool_qmp_value.py "$QMP_SOCKET" set 0x1827364554637281
-
-Type ``continue`` in the guest probe's terminal. A passing result is
-``guest-cpu-host-alias-observed``. It proves guest CPU writes reached the
-DriverKit-backed host mapping and a host write was read by the guest CPU. It
-still does not prove Linux DMA-pool attachment, device DMA, coherency, or safe
-device teardown. If namespace creation or DAX mapping fails, retain the exact
-error and do not substitute writes to ordinary guest System RAM. After the
-probe exits, type ``quit`` in QEMU's monitor so the normal cleanup handler can
-release the test allocation. The qcow2 overlay remains on disk for reuse.
+The address is the one observed in the failed live test; it is not guaranteed
+to be chosen for any future DriverKit allocation. The script starts a paused
+q35 machine, hot-adds a 256 MiB NVDIMM backed by ordinary QEMU RAM, and
+reports QMP placement and HVF mapping trace output. It does not validate
+DriverKit memory, guest CPU access, Linux DMA-pool attachment, device DMA,
+coherency or teardown safety. The previous abort occurred in a running VM;
+this paused baseline also omits its disks and peripheral devices, so a pass
+alone does not isolate the cause. Use ``--device pc-dimm`` for a comparison.
+The trace can include host virtual addresses; review it before sharing.
 
 The standalone ``contrib/apple-vfio/scripts/dma_pool_preflight.py`` checks
 necessary address-layout conditions using recorded or synthetic metadata; it
