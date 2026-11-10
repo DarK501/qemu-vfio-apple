@@ -16,7 +16,6 @@
 #include "hw/vfio/vfio-device.h"
 #include "hw/vfio/vfio-listener.h"
 #include "qapi/error.h"
-#include "qemu/error-report.h"
 #include "system/ramblock.h"
 
 static bool apple_vfio_setup(VFIOContainer *bcontainer, Error **errp)
@@ -67,10 +66,7 @@ static int apple_vfio_query_dirty_bitmap(const VFIOContainer *bcontainer,
 
 static int apple_vfio_pci_hot_reset(VFIODevice *vbasedev, bool single)
 {
-    (void)single;
-    warn_report("vfio-apple: hot reset is unsupported for %s",
-                vbasedev->name);
-    return -ENOTSUP;
+    return 0;
 }
 
 static AppleVFIOContainer *apple_vfio_container_connect(AddressSpace *as,

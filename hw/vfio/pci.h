@@ -174,7 +174,6 @@ struct VFIOPCIDevice {
     bool req_enabled;
     bool has_flr;
     bool has_pm_reset;
-    bool reset_once;
     bool rom_read_failed;
     bool no_kvm_intx;
     bool no_kvm_msi;

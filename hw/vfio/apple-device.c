@@ -269,7 +269,6 @@ static void apple_vfio_pci_init(VFIOApplePCIDevice *adev)
      * revisit this.
      */
     vdev->no_bar_quirks = true;
-    vdev->reset_once = true;
 }
 
 static bool apple_vfio_pci_pre_realize(VFIOApplePCIDevice *adev, Error **errp)
@@ -421,28 +420,13 @@ static int apple_vfio_device_feature(VFIODevice *vdev,
 static int apple_vfio_device_reset(VFIODevice *vbasedev)
 {
     io_connect_t conn = apple_vfio_connection(vbasedev);
-    kern_return_t kr;
 
     if (conn == IO_OBJECT_NULL) {
-        warn_report("vfio-apple: reset requested for %s without a connection",
-                    vbasedev->name);
         return -ENODEV;
     }
 
-    info_report("vfio-apple: requesting DriverKit reset for %s",
-                vbasedev->name);
-    kr = apple_host_backend()->client->reset_device(conn);
-    if (kr != KERN_SUCCESS) {
-        warn_report("vfio-apple: DriverKit function reset for %s failed: "
-                    "0x%x; no automatic retry or bus reset was attempted. "
-                    "Manual device recovery may be required",
-                    vbasedev->name, (unsigned int)kr);
-        return -EIO;
-    }
-
-    info_report("vfio-apple: DriverKit reset returned success for %s",
-                vbasedev->name);
-    return 0;
+    return apple_host_backend()->client->reset_device(conn) == KERN_SUCCESS ?
+        0 : -EIO;
 }
 
 static int apple_vfio_get_region_info(VFIODevice *vbasedev,

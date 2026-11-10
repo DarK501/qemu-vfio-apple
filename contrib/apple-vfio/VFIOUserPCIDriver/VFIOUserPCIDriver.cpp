@@ -593,8 +593,6 @@ vfio_user_release_claim(VFIOUserPCIDriverUserClient *client)
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: retained Start-time PCI Open; bus mastering is off");
     }
-    vfio_user_dma_log("lifecycle: claim release clearing owner start_open=%d",
-                      (int)driver->ivars->startOpen);
     client->ivars->claimed = false;
     __atomic_store_n(&driver->ivars->claimBlocked, false, __ATOMIC_RELEASE);
     __atomic_store_n(&driver->ivars->openerClient, nullptr, __ATOMIC_RELEASE);
@@ -1503,8 +1501,6 @@ IMPL(VFIOUserPCIDriver, Start)
     ret = pciDevice->Open(this, 0);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start early PCI Open returned %#x", ret);
     ivars->startOpen = (ret == kIOReturnSuccess);
-    vfio_user_dma_log("lifecycle: service Start PCI Open result=%#x retained=%d",
-                      ret, (int)ivars->startOpen);
 
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Start calling RegisterService");
     RegisterService();
@@ -1544,40 +1540,23 @@ kern_return_t
 IMPL(VFIOUserPCIDriver, Stop)
 {
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop entered");
-    if (ivars != nullptr) {
-        vfio_user_dma_log(
-            "lifecycle: service Stop entered start_open=%d owner_present=%d "
-            "claim_blocked=%d",
-            (int)ivars->startOpen,
-            (int)(__atomic_load_n(&ivars->openerClient, __ATOMIC_ACQUIRE) != nullptr),
-            (int)__atomic_load_n(&ivars->claimBlocked, __ATOMIC_ACQUIRE));
-    } else {
-        vfio_user_dma_log("lifecycle: service Stop entered without state");
-    }
     if (ivars != nullptr &&
         __atomic_load_n(&ivars->openerClient, __ATOMIC_ACQUIRE) != nullptr) {
         os_log(OS_LOG_DEFAULT,
                "vfio-user-dext: provider stop request rejected while PCI "
                "device remains claimed; DriverKit may still force teardown");
-        vfio_user_dma_log("lifecycle: service Stop refused: owner present");
         return kIOReturnStillOpen;
     }
     if (ivars != nullptr && ivars->startOpen) {
         IOPCIDevice *stopDevice = vfio_user_get_pci_device(this);
         if (stopDevice != nullptr) {
-            vfio_user_dma_log("lifecycle: service Stop closing Start-time PCI Open");
             stopDevice->Close(this, 0);
-            vfio_user_dma_log("lifecycle: service Stop Start-time PCI Close returned");
             os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop closed early PCI Open");
-        } else {
-            vfio_user_dma_log("lifecycle: service Stop cannot close Start-time PCI Open: provider unavailable");
         }
     }
     IOSafeDeleteNULL(ivars, VFIOUserPCIDriver_IVars, 1);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service Stop calling super");
-    vfio_user_dma_log("lifecycle: service Stop calling super");
     kern_return_t ret = Stop(provider, SUPERDISPATCH);
-    vfio_user_dma_log("lifecycle: service super Stop returned %#x", ret);
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: service super Stop returned %#x", ret);
     return ret;
 }
@@ -1612,16 +1591,6 @@ kern_return_t
 IMPL(VFIOUserPCIDriverUserClient, Stop)
 {
     os_log(OS_LOG_DEFAULT, "vfio-user-dext: user client Stop entered");
-    if (ivars != nullptr) {
-        vfio_user_dma_log(
-            "lifecycle: client Stop entered claimed=%d active_regions=%llu "
-            "active_chunks=%llu dma_buffer=%d interrupts=%d pending_cancels=%u",
-            (int)ivars->claimed, ivars->activeDMARegionCount,
-            ivars->activeDMAChunkCount, (int)(ivars->dmaBuffer != nullptr),
-            (int)ivars->interruptsSetUp, ivars->pendingInterruptCancelCount);
-    } else {
-        vfio_user_dma_log("lifecycle: client Stop entered without state");
-    }
     if (ivars != nullptr &&
         (ivars->activeDMARegionCount != 0 || ivars->dmaCompleteFailureCount != 0)) {
         vfio_user_dma_log(
@@ -1802,42 +1771,37 @@ static kern_return_t
 vfio_user_reset_device(VFIOUserPCIDriverUserClient *client)
 {
     if (client == nullptr || client->ivars == nullptr) {
-        vfio_user_dma_log("reset: rejected: no client state (kIOReturnBadArgument)");
         return kIOReturnBadArgument;
     }
 
     if (!vfio_user_service_claimed(client)) {
-        vfio_user_dma_log("reset: rejected: device not claimed (kIOReturnNotOpen)");
         return kIOReturnNotOpen;
     }
 
     IOService *driverService = client->GetProvider();
     if (driverService == nullptr) {
-        vfio_user_dma_log("reset: rejected: no driver service (kIOReturnNotAttached)");
         return kIOReturnNotAttached;
     }
 
     IOPCIDevice *pciDevice = vfio_user_get_pci_device(driverService);
     if (pciDevice == nullptr) {
-        vfio_user_dma_log("reset: rejected: provider is not an IOPCIDevice "
-                          "(kIOReturnUnsupported from dext)");
         return kIOReturnUnsupported;
     }
 
     /*
      * IOPCIDevice::Reset() handles config save/restore, link training, and
-     * device-ready polling internally. Do not escalate a failed function
-     * reset to a hot reset, which could affect devices sharing the bridge.
+     * device-ready polling internally.  Prefer FLR; fall back to an
+     * upstream-port hot reset (secondary bus reset) if the function
+     * doesn't advertise FLR.
      */
-    vfio_user_dma_log("reset: requesting function reset");
     kern_return_t ret = pciDevice->Reset(kIOPCIDeviceResetTypeFunctionReset,
                                          kIOPCIDeviceResetOptionNone);
-    vfio_user_dma_log("reset: IOPCIDevice::Reset(function) returned %#x", ret);
-    if (ret != kIOReturnSuccess) {
-        vfio_user_dma_log("reset: function reset failed; no automatic "
-                          "retry or hot reset will be attempted");
+    if (ret == kIOReturnSuccess) {
+        return ret;
     }
-    return ret;
+
+    return pciDevice->Reset(kIOPCIDeviceResetTypeHotReset,
+                            kIOPCIDeviceResetOptionNone);
 }
 
 static kern_return_t
@@ -2040,8 +2004,6 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     VFIOUserPCIDeviceIdentity identity;
     kern_return_t ret = vfio_user_read_identity(driverService, &identity);
     if (ret != kIOReturnSuccess) {
-        vfio_user_dma_log("ExternalMethod: selector %llu rejected: identity "
-                          "read failed %#x", selector, ret);
         return ret;
     }
 
@@ -2051,8 +2013,6 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
         selector != kVFIOUserPCIDriverUserClientMethodClaimSelected &&
         selector != kVFIOUserPCIDriverUserClientMethodReleaseClaim &&
         !vfio_user_service_claimed(this)) {
-        vfio_user_dma_log("ExternalMethod: selector %llu rejected: not "
-                          "claimed (kIOReturnNotOpen)", selector);
         return kIOReturnNotOpen;
     }
 
@@ -2385,10 +2345,7 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     }
 
     case kVFIOUserPCIDriverUserClientMethodResetDevice:
-        vfio_user_dma_log("reset: ExternalMethod selector 17 dispatched");
-        ret = vfio_user_reset_device(this);
-        vfio_user_dma_log("reset: ExternalMethod selector 17 returning %#x", ret);
-        return ret;
+        return vfio_user_reset_device(this);
 
     case kVFIOUserPCIDriverUserClientMethodSetIRQMask: {
         if (arguments->scalarInput == nullptr ||
@@ -2409,8 +2366,6 @@ VFIOUserPCIDriverUserClient::ExternalMethod(uint64_t selector,
     }
 
     default:
-        vfio_user_dma_log("ExternalMethod: unknown selector %llu "
-                          "(kIOReturnUnsupported)", selector);
         return kIOReturnUnsupported;
     }
 }

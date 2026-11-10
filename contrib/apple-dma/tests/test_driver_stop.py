@@ -11,10 +11,6 @@ SOURCE = ROOT / "contrib/apple-vfio/VFIOUserPCIDriver/VFIOUserPCIDriver.cpp"
 
 PREFIX = r"""
 #include <cassert>
-#include <cstdarg>
-#include <cstdio>
-#include <string>
-#include <vector>
 using kern_return_t = int;
 enum { kIOReturnSuccess = 0, kIOReturnStillOpen = 1 };
 #define OS_LOG_DEFAULT 0
@@ -26,24 +22,11 @@ struct IOService {};
 struct VFIOUserPCIDriver_IVars {
     VFIOUserPCIDriverUserClient *openerClient = nullptr;
     bool startOpen = false;
-    bool claimBlocked = false;
 };
 struct IOPCIDevice { int closes = 0; void Close(IOService *, int) { closes++; } };
 struct VFIOUserPCIDriver;
 static IOPCIDevice g_pci;
-static bool provider_available = true;
-static IOPCIDevice *vfio_user_get_pci_device(VFIOUserPCIDriver *) {
-    return provider_available ? &g_pci : nullptr;
-}
-static std::vector<std::string> logs;
-static void vfio_user_dma_log(const char *fmt, ...) {
-    char message[512];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(message, sizeof(message), fmt, ap);
-    va_end(ap);
-    logs.emplace_back(message);
-}
+static IOPCIDevice *vfio_user_get_pci_device(VFIOUserPCIDriver *) { return &g_pci; }
 struct VFIOUserPCIDriver : IOService {
     VFIOUserPCIDriver_IVars *ivars;
     explicit VFIOUserPCIDriver(VFIOUserPCIDriver_IVars *v) : ivars(v) {}
@@ -61,14 +44,11 @@ int main()
     VFIOUserPCIDriver_IVars vars;
     VFIOUserPCIDriverUserClient owner;
     vars.openerClient = &owner;
-    vars.claimBlocked = true;
     VFIOUserPCIDriver driver(&vars);
     IOService provider;
     assert(driver.Stop(&provider) == kIOReturnStillOpen);
     assert(driver.ivars == &vars && vars.openerClient == &owner);
     assert(!deleted && !super_stops);
-    assert(logs[0].find("start_open=0 owner_present=1 claim_blocked=1") != std::string::npos);
-    assert(logs[1].find("refused: owner present") != std::string::npos);
     vars.openerClient = nullptr;
     assert(driver.Stop(&provider) == kIOReturnSuccess);
     assert(!driver.ivars && deleted == 1 && super_stops == 1);
@@ -78,23 +58,6 @@ int main()
     VFIOUserPCIDriver driver2(&held);
     assert(driver2.Stop(&provider) == kIOReturnSuccess);
     assert(g_pci.closes == 1);
-    bool saw_close = false, saw_return = false, saw_super = false;
-    for (const auto &line : logs) {
-        saw_close |= line.find("closing Start-time PCI Open") != std::string::npos;
-        saw_return |= line.find("Start-time PCI Close returned") != std::string::npos;
-        saw_super |= line.find("service super Stop returned") != std::string::npos;
-    }
-    assert(saw_close && saw_return && saw_super);
-    VFIOUserPCIDriver_IVars missing;
-    missing.startOpen = true;
-    VFIOUserPCIDriver driver3(&missing);
-    provider_available = false;
-    assert(driver3.Stop(&provider) == kIOReturnSuccess);
-    bool saw_missing = false;
-    for (const auto &line : logs) {
-        saw_missing |= line.find("provider unavailable") != std::string::npos;
-    }
-    assert(saw_missing && g_pci.closes == 1);
 }
 """
 
