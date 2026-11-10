@@ -1222,6 +1222,12 @@ static dma_addr_t apple_dma_map_phys(struct device *dev, phys_addr_t phys,
 		dev_info(dev, "apple_dma: map_phys #%u phys=%pap size=%zu\n",
 			 count, &phys, size);
 
+	if (attrs & DMA_ATTR_MMIO) {
+		dev_warn_ratelimited(dev,
+			"apple_dma: DMA mapping of MMIO resources is unsupported\n");
+		return DMA_MAPPING_ERROR;
+	}
+
 	if (!apple_dma_map_context_supported(ad, dev))
 		return DMA_MAPPING_ERROR;
 

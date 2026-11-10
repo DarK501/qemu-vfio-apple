@@ -171,9 +171,10 @@ The guest module currently fails new streaming mappings in atomic context and
 nonblocking DMA allocations. Unmapping in an atomic or otherwise unusable
 context is still fatal because the backend cannot safely defer host unmaps.
 Linux permits these calls, so this is a temporary safeguard, not DMA API
-conformance. Linux DMA dispatch can also bypass the hook, and its lifetime is
-not fully synchronized. Do not enable physical guest DMA until those issues
-are resolved and validated.
+conformance. MMIO resource DMA mappings are also rejected when they reach the
+guest hook; the companion only registers guest RAM. Linux DMA dispatch can
+also bypass the hook, and its lifetime is not fully synchronized. Do not
+enable physical guest DMA until those issues are resolved and validated.
 
 Interrupts
 ----------

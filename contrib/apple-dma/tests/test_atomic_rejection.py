@@ -18,6 +18,7 @@ typedef uint64_t dma_addr_t;
 typedef uint64_t u64;
 enum dma_data_direction { DMA_TO_DEVICE };
 #define DMA_MAPPING_ERROR UINT64_MAX
+#define DMA_ATTR_MMIO 4
 #define APPLE_DMA_STAT_MAP 0
 #define dev_info(...) ((void)0)
 #define dev_warn_ratelimited(...) ((void)0)
@@ -70,6 +71,8 @@ int main(void)
     assert(apple_dma_map_phys(&dev, 0x1000, 4096, DMA_TO_DEVICE, 0)
            == DMA_MAPPING_ERROR && !originals);
     active.ready = true;
+    assert(apple_dma_map_phys(&dev, 0x1000, 4096, DMA_TO_DEVICE, DMA_ATTR_MMIO)
+           == DMA_MAPPING_ERROR && !originals);
     assert(apple_dma_map_phys(&dev, 0x1000, 4096, DMA_TO_DEVICE, 0)
            == 0x2000 && originals == 1);
 }
