@@ -214,6 +214,11 @@ static bool apple_dma_backend_alloc(HostMemoryBackend *hostmem, Error **errp)
     memory_region_init_ram_ptr(&hostmem->mr, OBJECT(hostmem),
                                "apple-dma-pool", hostmem->size,
                                (void *)(uintptr_t)backend->mapping);
+    /*
+     * ram_ptr regions leave mr->align at 0, which makes memory-device
+     * plug code compute size % 0.
+     */
+    hostmem->mr.align = qemu_real_host_page_size();
     apple_dma_track(backend);
     return true;
 
