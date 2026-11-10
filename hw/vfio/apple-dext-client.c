@@ -924,7 +924,11 @@ apple_dext_client_setup_interrupts(io_connect_t connection,
         return kr;
     }
 
-    if (out_num_vectors != NULL && outputCount >= 1) {
+    if (outputCount != 1 || output[0] == 0 || output[0] > 256) {
+        return kIOReturnBadArgument;
+    }
+
+    if (out_num_vectors != NULL) {
         *out_num_vectors = (uint32_t)output[0];
     }
 
